@@ -84,3 +84,35 @@ async def test_websocket_handshake_has_a_deadline():
     with pytest.raises(RuntimeError, match="cause=TimeoutError"):
         async with asyncio.timeout(1):
             await market.stream(asyncio.Queue(), asyncio.Event())
+
+
+async def test_configured_proxy_is_used_for_rest_and_websocket(monkeypatch):
+    async with public_server() as (address, _):
+        settings = Settings.model_validate(
+            {
+                "market": {
+                    "binance_rest_url": f"http://{address}",
+                    "binance_ws_url": f"ws://{address}/public/ws",
+                    "binance_proxy_url": "http://127.0.0.1:7890",
+                }
+            }
+        )
+        async with aiohttp.ClientSession() as session:
+            seen = []
+            original_get, original_ws = session.get, session.ws_connect
+
+            def get(url, **kwargs):
+                seen.append(("REST", kwargs.pop("proxy")))
+                return original_get(url, **kwargs)
+
+            def ws_connect(url, **kwargs):
+                seen.append(("WS", kwargs.pop("proxy")))
+                return original_ws(url, **kwargs)
+
+            monkeypatch.setattr(session, "get", get)
+            monkeypatch.setattr(session, "ws_connect", ws_connect)
+            market = BinanceMarket(settings, session)
+            await market.specification()
+            with pytest.raises(RuntimeError, match="disconnected"):
+                await market.stream(asyncio.Queue(), asyncio.Event())
+            assert seen == [("REST", "http://127.0.0.1:7890"), ("WS", "http://127.0.0.1:7890")]

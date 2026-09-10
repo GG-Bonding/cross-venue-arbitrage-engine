@@ -20,6 +20,7 @@ class MT5Market:
         self.worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mt5-market")
         self.spec: MT5Spec | None = None
         self.last_key: tuple | None = None
+        self.quote_deadline_ms: int | None = None
 
     async def _call(self, function, *args):
         return await asyncio.get_running_loop().run_in_executor(
@@ -44,9 +45,8 @@ class MT5Market:
     def _initialize(self) -> MT5Spec:
         config = self.settings.mt5
         kwargs = {"timeout": config.initialize_timeout_ms}
-        if config.terminal_path:
-            kwargs["path"] = config.terminal_path
-        if not self.api.initialize(**kwargs):
+        args = (config.terminal_path,) if config.terminal_path else ()
+        if not self.api.initialize(*args, **kwargs):
             raise RuntimeError(f"MT5 initialize failed error={self.api.last_error()}")
         symbol = self.settings.symbol.mt5
         if not self.api.symbol_select(symbol, True):
@@ -58,6 +58,7 @@ class MT5Market:
             raise RuntimeError(
                 f"MT5 symbol_info failed symbol={symbol} error={self.api.last_error()}"
             )
+        self.quote_deadline_ms = self.clock() + config.quote_startup_timeout_ms
         return MT5Spec(
             symbol,
             Decimal(str(info.trade_contract_size)),
@@ -75,6 +76,10 @@ class MT5Market:
             raise RuntimeError(
                 f"MT5 tick failed symbol={self.settings.symbol.mt5} error={self.api.last_error()}"
             )
+        if tick.time_msc == 0 and tick.bid == 0 and tick.ask == 0:
+            if self.last_key is None and self.clock() < self.quote_deadline_ms:
+                return None
+            raise RuntimeError(f"MT5 empty tick after startup symbol={self.settings.symbol.mt5}")
         key = (tick.time_msc, tick.bid, tick.ask)
         if self.last_key is not None and (key == self.last_key or key[0] < self.last_key[0]):
             return None
@@ -83,8 +88,9 @@ class MT5Market:
             Decimal(str(tick.ask)),
             None,
             None,
-            int(tick.time_msc),
+            int(tick.time_msc) - self.settings.mt5.tick_time_offset_minutes * 60_000,
             self.clock(),
+            raw_exchange_ts_ms=int(tick.time_msc),
         )
         self.last_key = key
         return q
@@ -93,7 +99,11 @@ class MT5Market:
         return await self._call(self._read)
 
     async def stream(self, queue: asyncio.Queue, stop: asyncio.Event) -> None:
-        log_event("mt5_connected", symbol=self.settings.symbol.mt5)
+        log_event(
+            "mt5_connected",
+            symbol=self.settings.symbol.mt5,
+            tick_time_offset_minutes=self.settings.mt5.tick_time_offset_minutes,
+        )
         while not stop.is_set():
             quote = await self.read_quote()
             if quote is not None:

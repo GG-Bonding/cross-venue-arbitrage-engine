@@ -65,7 +65,9 @@ class BinanceMarket:
     async def specification(self) -> BinanceSpec:
         url = self.settings.market.binance_rest_url.rstrip("/") + "/fapi/v1/exchangeInfo"
         try:
-            async with self.session.get(url) as response:
+            async with self.session.get(
+                url, proxy=self.settings.market.binance_proxy_url
+            ) as response:
                 response.raise_for_status()
                 data = await response.json()
             return parse_exchange_info(data, self.settings.symbol.binance)
@@ -81,7 +83,9 @@ class BinanceMarket:
         try:
             # Bound the handshake explicitly; ClientTimeout.total does not bound a WS session.
             async with asyncio.timeout(self.settings.market.http_timeout_ms / 1000):
-                connection = await self.session.ws_connect(url, heartbeat=20)
+                connection = await self.session.ws_connect(
+                    url, heartbeat=20, proxy=self.settings.market.binance_proxy_url
+                )
             async with connection as ws:
                 log_event("binance_connected", symbol=symbol)
                 while not stop.is_set():

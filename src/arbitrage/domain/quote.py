@@ -10,6 +10,7 @@ class Quote:
     ask_qty: Decimal | None
     exchange_ts_ms: int
     local_ts_ms: int
+    raw_exchange_ts_ms: int | None = None
 
     def __post_init__(self) -> None:
         for name in ("bid", "ask", "bid_qty", "ask_qty"):
@@ -22,3 +23,5 @@ class Quote:
             raise ValueError(f"Invalid quote bid={self.bid} ask={self.ask}")
         if self.exchange_ts_ms < 0 or self.local_ts_ms < 0:
             raise ValueError("Quote timestamps must be nonnegative UTC milliseconds")
+        if self.raw_exchange_ts_ms is not None and self.raw_exchange_ts_ms < 0:
+            raise ValueError("Raw quote timestamp must be nonnegative")

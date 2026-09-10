@@ -47,6 +47,22 @@ MetaTrader5 二进制包需要与你的 Windows/Python 版本匹配；若安装�
 通过 `mt5.terminal_path` 选择终端，通过 `symbol.mt5` 设置 Broker 实际符号。
 程序不读取 Binance API key，不发送签名请求，也不调用 MT5 下单函数。
 
+本地已有 `MetaTrader_init/terminal64.exe` 时，在 `config/config.yaml` 的
+`mt5.terminal_path` 填写该文件的绝对路径，程序复用终端保存的登录会话。
+首次订阅品种返回全零 Tick 时最多等待 `mt5.quote_startup_timeout_ms`（默认 5000ms），
+期间不生成 Quote；超过期限或已接收到行情后再出现空 Tick 时停止并报错。
+`MetaTrader_init/` 整个目录和 `config/config.yaml` 均被 Git 忽略。
+
+如果 Binance 需要本机 HTTP 代理，设置 `market.binance_proxy_url`，例如
+`http://127.0.0.1:7890`。该代理用于 Binance REST 和 WebSocket，不改变系统代理或 MT5 设置。
+
+有些 Broker 的 `time_msc` 带服务器时区偏移。确认后设置 `mt5.tick_time_offset_minutes`，
+含义是 **原始时间 − UTC**，例如原始时间比 UTC 快 3 小时则填 `180`。
+默认值为 `0`，程序不会自动估算偏移或用接收时间替换报价时间。
+Quote 的 `exchange_ts_ms` 保存归一化后的 UTC，`raw_exchange_ts_ms` 保留 MT5 原始值。
+freshness/skew 检查仍使用原有阈值；Broker 切换夏令时后需要重新核对偏移。
+本机联调结果见 [docs/MT5_INTEGRATION.md](docs/MT5_INTEGRATION.md)。
+
 启动时从 Binance `exchangeInfo` 读取 tickSize、stepSize、minQty、maxQty、minNotional 和
 quantityPrecision/pricePrecision；从 MT5 `symbol_info()` 读取 contract size 和手数限制。
 缺少过滤器、品种不存在或暂停交易时失败退出，不替换成其他品种或猜测规格。

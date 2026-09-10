@@ -13,6 +13,12 @@
 本次通过本地 HTTP/WebSocket 服务与 MT5 测试适配器验证解析、断连、重复事件和线程行为；
 这些测试不代表真实账户联调或 Phase 2–4 的成交验证。
 
-本机外部连通性检查：Binance 公共 REST 合约信息读取成功；实际 WebSocket 检查在
-10 秒期限内没有完成报价接收。本机未安装 MetaTrader5 Python 包，尚未验证真实 MT5 终端连接。
-外部 WebSocket 与 MT5 联调仍需在目标运行环境进行，本地离线测试不掩盖这些限制。
+首次交付时 Binance 公共 REST 可用，WebSocket 超时，MT5 包尚未安装。
+后续使用用户提供的已登录终端完成双市场真实行情联调：显式代理使 Binance WebSocket
+正常收到报价，MT5 Python 包安装成功，确认指定终端和 XAUUSD 合约规格。
+详细采样结果及仍存在的报价时延见 [MT5_INTEGRATION.md](MT5_INTEGRATION.md)。
+
+[MT5 initialize 官方说明](https://www.mql5.com/en/docs/python_metatrader5/mt5initialize_py)
+规定终端 EXE 路径为首个位置参数；接入代码按此传递，省略登录参数以复用既有会话。
+本机采样发现 Broker 原始 Tick 时间与 UTC 存在固定约 3 小时差，这是本机观测，
+不是所有 MT5 Broker 的统一规定。通过显式配置归一化，同时保留原始 time_msc。

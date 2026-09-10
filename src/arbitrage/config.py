@@ -40,6 +40,7 @@ class MarketConfig(ConfigModel):
     queue_size: int = Field(default=1000, ge=1)
     binance_rest_url: str = "https://fapi.binance.com"
     binance_ws_url: str = "wss://fstream.binance.com/public/ws"
+    binance_proxy_url: str | None = Field(default=None, pattern=r"^https?://")
 
 
 class SymbolConfig(ConfigModel):
@@ -50,6 +51,9 @@ class SymbolConfig(ConfigModel):
 class MT5Config(ConfigModel):
     terminal_path: str | None = None
     initialize_timeout_ms: int = Field(default=10000, ge=1)
+    quote_startup_timeout_ms: int = Field(default=5000, ge=1)
+    # Broker raw tick time minus UTC. Explicitly configured, never learned from quote age.
+    tick_time_offset_minutes: int = Field(default=0, ge=-840, le=840)
 
 
 class TradingConfig(ConfigModel):

@@ -26,11 +26,17 @@ market:
   queue_size: 1000
   binance_rest_url: https://fapi.binance.com
   binance_ws_url: wss://fstream.binance.com/public/ws
+  # Optional HTTP proxy, used for both REST and WebSocket. No global proxy changes.
+  binance_proxy_url: null
 
 mt5:
   # Set this when several MT5 terminals are installed. Use single quotes for Windows paths.
   terminal_path: null
   initialize_timeout_ms: 10000
+  quote_startup_timeout_ms: 5000
+  # Raw broker tick timestamp minus UTC, in minutes. Default assumes UTC.
+  # Configure only after verifying the broker's clock; review when DST changes.
+  tick_time_offset_minutes: 0
 
 trading:
   binance_qty: "1"

@@ -148,6 +148,81 @@ async def test_mt5_none_error_has_context_and_closes():
     assert api.closed
 
 
+async def test_mt5_explicit_terminal_path_uses_documented_positional_argument():
+    class PathMT5(FakeMT5):
+        def initialize(self, path, /, **kwargs):
+            self.record()
+            assert path == "E:/project/MetaTrader_init/terminal64.exe"
+            assert kwargs == {"timeout": 10000}
+            return True
+
+    api = PathMT5()
+    settings = Settings.model_validate(
+        {"mt5": {"terminal_path": "E:/project/MetaTrader_init/terminal64.exe"}}
+    )
+    async with MT5Market(settings, api=api) as market:
+        assert market.spec.symbol == "XAUUSD"
+    assert api.closed
+
+
+async def test_mt5_broker_time_normalization_preserves_raw_timestamp():
+    api = FakeMT5()
+    api.tick.time_msc = 10_801_000
+    settings = Settings.model_validate({"mt5": {"tick_time_offset_minutes": 180}})
+    async with MT5Market(settings, api=api, clock=lambda: 1010) as market:
+        q = await market.read_quote()
+        assert q.exchange_ts_ms == 1000
+        assert q.raw_exchange_ts_ms == 10_801_000
+        assert q.local_ts_ms == 1010
+        assert await market.read_quote() is None
+
+
+async def test_mt5_default_does_not_guess_broker_offset():
+    api = FakeMT5()
+    api.tick.time_msc = 10_801_000
+    async with MT5Market(Settings(), api=api, clock=lambda: 1010) as market:
+        q = await market.read_quote()
+        assert q.exchange_ts_ms == 10_801_000
+        assert q.raw_exchange_ts_ms == 10_801_000
+
+
+async def test_mt5_normalization_does_not_make_old_quotes_fresh():
+    from arbitrage.risk.quote_guard import QuoteGuard
+
+    api = FakeMT5()
+    api.tick.time_msc = 10_801_000
+    settings = Settings.model_validate({"mt5": {"tick_time_offset_minutes": 180}})
+    async with MT5Market(settings, api=api, clock=lambda: 2000) as market:
+        q = await market.read_quote()
+        assert QuoteGuard(300, 200).check(quote(ts=2000), q, 2000) == "quote_stale"
+
+
+async def test_mt5_initial_empty_tick_waits_without_inventing_a_quote():
+    api = FakeMT5()
+    api.tick = SimpleNamespace(bid=0.0, ask=0.0, time_msc=0)
+    clock = [1000]
+    async with MT5Market(Settings(), api=api, clock=lambda: clock[0]) as market:
+        assert await market.read_quote() is None
+        clock[0] = 1100
+        api.tick = SimpleNamespace(bid=4412.5, ask=4412.62, time_msc=1090)
+        assert (await market.read_quote()).exchange_ts_ms == 1090
+        api.tick = SimpleNamespace(bid=0.0, ask=0.0, time_msc=0)
+        with pytest.raises(RuntimeError, match="empty tick"):
+            await market.read_quote()
+
+
+async def test_mt5_initial_empty_tick_has_bounded_wait():
+    api = FakeMT5()
+    api.tick = SimpleNamespace(bid=0.0, ask=0.0, time_msc=0)
+    clock = [1000]
+    settings = Settings.model_validate({"mt5": {"quote_startup_timeout_ms": 500}})
+    async with MT5Market(settings, api=api, clock=lambda: clock[0]) as market:
+        assert await market.read_quote() is None
+        clock[0] = 1501
+        with pytest.raises(RuntimeError, match="empty tick.*symbol=XAUUSD"):
+            await market.read_quote()
+
+
 async def test_consumer_watchdog_runs_when_queue_is_silent(tmp_path, monkeypatch):
     settings = Settings.model_validate(
         {
