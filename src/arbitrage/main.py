@@ -34,6 +34,10 @@ def main() -> None:
     parser.add_argument("--database", type=Path, help="Override SQLite path")
     commands = parser.add_mutually_exclusive_group()
     commands.add_argument("--demo", action="store_true", help="Run finite offline synthetic quotes")
+    commands.add_argument("--web", action="store_true", help="Local paper dashboard at 127.0.0.1")
+    parser.add_argument(
+        "--port", type=int, default=8765, help="Local dashboard port (default 8765)"
+    )
     commands.add_argument(
         "--status", action="store_true", help="Read database status without feeds"
     )
@@ -43,6 +47,10 @@ def main() -> None:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
     try:
+        if not 1 <= args.port <= 65535:
+            raise ValueError("--port must be between 1 and 65535")
+        if args.web and args.duration is not None:
+            raise ValueError("--web uses the page Start/Stop controls; omit --duration")
         if args.config:
             settings = load_settings(args.config)
         else:
@@ -54,7 +62,16 @@ def main() -> None:
         settings = settings.model_copy(
             update={"database": settings.database.model_copy(update={"path": path})}
         )
-        if args.status:
+        if args.web:
+            from arbitrage.monitor.server import run_dashboard
+
+            # The browser samples live memory; avoid duplicating every tick in a console log.
+            for handler in logging.getLogger().handlers:
+                handler.addFilter(
+                    lambda record: not record.getMessage().startswith('{"event": "market_snapshot"')
+                )
+            asyncio.run(run_dashboard(settings, port=args.port))
+        elif args.status:
             print(dumps(read_status(path)))
         elif args.demo:
             asyncio.run(run_demo(settings))

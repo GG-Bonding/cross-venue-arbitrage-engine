@@ -6,6 +6,7 @@ from arbitrage.config import Settings
 from arbitrage.market.binance_market import BinanceMarket
 from arbitrage.market.mt5_market import MT5Market
 from arbitrage.observability import log_event, now_ms
+from arbitrage.persistence.session_lock import SessionLock
 from arbitrage.persistence.sqlite_repository import SQLiteRepository
 from arbitrage.strategy.arbitrage_strategy import ArbitrageStrategy
 
@@ -31,8 +32,20 @@ async def consume_quotes(engine, queue: asyncio.Queue, stop: asyncio.Event, *, c
             await engine.on_timer(now)
 
 
-async def run_market(settings: Settings, *, duration: float | None = None) -> None:
+async def run_market(
+    settings: Settings,
+    *,
+    duration: float | None = None,
+    stop: asyncio.Event | None = None,
+    on_engine=None,
+) -> None:
     settings.require_paper()
+    with SessionLock(settings.database.path):
+        await _run_market(settings, duration=duration, stop=stop, on_engine=on_engine)
+
+
+async def _run_market(settings, *, duration, stop, on_engine) -> None:
+    stop = stop if stop is not None else asyncio.Event()
     timeout = aiohttp.ClientTimeout(total=settings.market.http_timeout_ms / 1000)
     async with (
         SQLiteRepository(settings.database.path) as repo,
@@ -49,7 +62,8 @@ async def run_market(settings: Settings, *, duration: float | None = None) -> No
         )
         engine = ArbitrageStrategy(settings, spec, repo)
         await engine.start(now_ms())
-        stop = asyncio.Event()
+        if on_engine is not None:
+            on_engine(engine)
         queue = asyncio.Queue(maxsize=settings.market.queue_size)
         loop = asyncio.get_running_loop()
         timer = loop.call_later(duration, stop.set) if duration is not None else None

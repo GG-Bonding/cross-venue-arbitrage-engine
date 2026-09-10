@@ -17,3 +17,4 @@ MetaTrader_init/
 *.db
 *.db-wal
 *.db-shm
+*.run.lock

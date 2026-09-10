@@ -6,6 +6,36 @@ Python 3.12+，单进程 asyncio，Decimal 价格/数量，SQLite WAL。
 Binance 和 MT5 的真实下单接口均未实现。`TRADING_MODE=live` 未确认时启动失败；
 即使设置 `CONFIRM_LIVE_TRADING=I_UNDERSTAND`，Phase 1 仍拒绝 live。
 
+## 本地网页监控
+
+安装依赖并配置好 MT5 后，在项目根目录运行：
+
+```powershell
+.\.venv\Scripts\python.exe -m arbitrage.main --web --config config/config.yaml
+```
+
+浏览器打开 **http://127.0.0.1:8765**，点击“启动 Paper 监控”。
+服务默认等待操作；“停止监控”走模拟订单清理流程，页面保留可查看的最后报价和历史订单。
+重新启动时先核对数据库，异常不会自动重试。需要更换端口时添加 `--port 8766`。
+`--web` 不与 `--demo`、`--status` 或 `--duration` 一起使用。
+
+页面提供双边 Bid/Ask、接收延迟/报价年龄、双向 Spread/Edge、确认次数与时长、
+价差曲线、当前模拟挂单、最近 50 笔订单和最近运行事件。支持桌面及手机尺寸布局。
+浏览器每约 0.5 秒采样内存状态，历史订单每约 5 秒刷新；页面采样不会增加策略 Tick 次数。
+行情过期、断线或引擎停止时不再展示有效信号；旧报价会变灰并显示状态。
+图表的无效采样为断档，不当作 0，也不用于收益计算。
+
+**当前 Paper 模式的含义：** 读取真实 Binance/MT5 行情，模拟挂单和撤单，但订单只存在于
+本地 SQLite，不向 Binance/MT5 发送交易请求。当前阶段尚未模拟成交、执行 MT5 对冲、
+计算手续费后的 PnL；页面不会展示虚构成交或收益。它也不是 Binance 测试网交易。
+
+网页仅绑定 `127.0.0.1`，不开放局域网和公网，不依赖外部 CDN。
+控制接口验证本地 Host、Origin 和会话 token；行情 JSON 不包含账户凭据或终端路径。
+同一数据库的实时 Paper 会话由操作系统锁互斥，网页与另一个命令行不能同时运行该策略。
+异常退出后操作系统释放锁，锁文件保留不代表仍被占用。旧版本进程应先停止再使用本版本。
+关闭浏览器不会停止后台监控，请使用页面停止按钮；关闭网页服务时 Ctrl+C 会清理 Paper 会话。
+详见 [docs/WEB_MONITOR.md](docs/WEB_MONITOR.md)。
+
 ## 快速运行
 
 Windows PowerShell，在仓库根目录执行：
@@ -131,6 +161,7 @@ src/arbitrage/
   config.py              配置验证与模式保护
   domain/                Quote、方向/状态、MakerOrder、合约规格
   market/                Binance WebSocket、MT5 worker、队列消费、demo
+  monitor/               本地网页、Paper 会话控制、状态和历史接口
   strategy/              Spread、连续确认、单槽策略
   execution/             本地 Maker 与撤单迟滞
   risk/                  行情有效性检查
