@@ -1,0 +1,43 @@
+mode: paper
+
+symbol:
+  binance: XAUUSDT
+  mt5: XAUUSD
+
+entry:
+  threshold: "4.20"
+  confirmation:
+    min_ticks: 3
+    min_duration_ms: 200
+
+maker:
+  cancel_threshold: "4.00"
+  cancel_confirm_ms: 50
+  max_pending_ms: 2000
+  paper_cancel_latency_ms: 20
+
+market:
+  max_quote_age_ms: 300
+  max_quote_skew_ms: 200
+  mt5_poll_ms: 20
+  watchdog_ms: 20
+  stream_timeout_ms: 5000
+  http_timeout_ms: 10000
+  queue_size: 1000
+  binance_rest_url: https://fapi.binance.com
+  binance_ws_url: wss://fstream.binance.com/public/ws
+
+mt5:
+  # Set this when several MT5 terminals are installed. Use single quotes for Windows paths.
+  terminal_path: null
+  initialize_timeout_ms: 10000
+
+trading:
+  binance_qty: "1"
+  # Optional, only after verifying the actual contract unit. Never infer it from the symbol.
+  # Phase 1 does not hedge; this value is informational until a verified hedge is implemented.
+  binance_underlying_per_qty: null
+
+database:
+  path: ./data/arbitrage.db
+  quote_sample_ms: 1000

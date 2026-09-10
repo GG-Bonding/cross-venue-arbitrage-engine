@@ -1,0 +1,22 @@
+from enum import StrEnum
+
+
+class Direction(StrEnum):
+    SHORT_BINANCE = "SHORT_BINANCE"
+    LONG_BINANCE = "LONG_BINANCE"
+
+
+class OrderState(StrEnum):
+    MAKER_PENDING = "MAKER_PENDING"
+    CANCELING = "CANCELING"
+    CANCELED = "CANCELED"
+
+
+class StrategyState(StrEnum):
+    IDLE = "IDLE"
+    CONFIRMING = "CONFIRMING"
+    PLACING_MAKER = "PLACING_MAKER"
+    MAKER_PENDING = "MAKER_PENDING"
+    CANCELING = "CANCELING"
+    SAFE_MODE = "SAFE_MODE"
+    ERROR = "ERROR"

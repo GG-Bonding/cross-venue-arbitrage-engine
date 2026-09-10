@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cross-venue-arbitrage-engine"
+version = "0.1.0"
+description = "Phase 1 Binance Futures / MT5 paper spread monitor"
+requires-python = ">=3.12"
+dependencies = ["aiohttp>=3.11,<4", "aiosqlite>=0.20,<1", "pydantic>=2.10,<3", "PyYAML>=6,<7"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "pytest-asyncio>=0.25,<2", "ruff>=0.9,<1"]
+mt5 = ["MetaTrader5>=5.0; sys_platform == 'win32'"]
+
+[project.scripts]
+arbitrage = "arbitrage.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"arbitrage.market" = ["demo.json"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]

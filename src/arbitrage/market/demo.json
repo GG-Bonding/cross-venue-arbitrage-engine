@@ -1,0 +1,22 @@
+{
+  "description": "Synthetic demonstration only; these are not verified live contract filters.",
+  "exchange_info": {
+    "symbols": [{
+      "symbol": "XAUUSDT", "status": "TRADING", "contractType": "TRADIFI_PERPETUAL", "quoteAsset": "USDT",
+      "quantityPrecision": 3, "pricePrecision": 2,
+      "filters": [
+        {"filterType": "PRICE_FILTER", "tickSize": "0.01", "minPrice": "0.01", "maxPrice": "100000"},
+        {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.001", "maxQty": "100"},
+        {"filterType": "MIN_NOTIONAL", "notional": "5"}
+      ]
+    }]
+  },
+  "ticks": [
+    {"offset_ms": 0, "binance": ["4416.90", "4416.98"], "mt5": ["4412.50", "4412.62"]},
+    {"offset_ms": 100, "binance": ["4416.90", "4416.98"], "mt5": ["4412.50", "4412.62"]},
+    {"offset_ms": 200, "binance": ["4416.90", "4416.98"], "mt5": ["4412.50", "4412.62"]},
+    {"offset_ms": 300, "binance": ["4430.00", "4430.10"], "mt5": ["4413.10", "4413.20"]},
+    {"offset_ms": 350, "binance": ["4430.00", "4430.10"], "mt5": ["4413.10", "4413.20"]},
+    {"offset_ms": 370, "binance": ["4413.00", "4413.10"], "mt5": ["4413.10", "4413.20"]}
+  ]
+}
