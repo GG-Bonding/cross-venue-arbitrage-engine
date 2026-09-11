@@ -51,8 +51,8 @@ function signal(prefix, direction, snapshot){
   const d=snapshot.directions[direction], c=snapshot.config;
   set(`${prefix}-spread`,fixed(d.raw_spread));
   set(`${prefix}-edge`,d.edge === null ? "—" : `${Number(d.edge)>=0?"+":""}${fixed(d.edge)}`);
-  $(`${prefix}-edge`).className=d.edge===null ? "" : Number(d.edge)>=0?"positive":"negative";
-  set(`${prefix}-state`,snapshot.quotes_valid ? labels[d.state] || d.state : "等待有效行情");
+  $(`${prefix}-edge`).className=!snapshot.quotes_valid || d.edge===null ? "" : Number(d.edge)>=0?"positive":"negative";
+  set(`${prefix}-state`,snapshot.quotes_valid ? labels[d.state] || d.state : `${reasons[snapshot.quote_reason] || "等待有效行情"} · ${d.raw_spread === null ? "暂无价差" : "价差仅供观察"}`);
   set(`${prefix}-count`,`${d.count} / ${c.min_ticks}`);
   set(`${prefix}-duration`,`${d.duration_ms} / ${c.min_duration_ms} ms`);
   $(`${prefix}-ticks-progress`).max=c.min_ticks;$(`${prefix}-ticks-progress`).value=d.count;
@@ -93,7 +93,7 @@ function render(snapshot){
   const o=snapshot.order;
   set("current-order",o?`当前 ${o.direction === "SHORT_BINANCE"?"SELL":"BUY"} · ${o.price} × ${o.quantity} · ${labels[o.state]||o.state}`:"当前没有挂单");
   renderEvents(snapshot.events);error(snapshot.error);
-  if(snapshot.timestamp_ms-sampleTime>=450){points.push({t:snapshot.timestamp_ms,a:snapshot.directions.SHORT_BINANCE.raw_spread,b:snapshot.directions.LONG_BINANCE.raw_spread});if(points.length>120) points.shift();sampleTime=snapshot.timestamp_ms;}
+  if(snapshot.timestamp_ms-sampleTime>=450){points.push({t:snapshot.timestamp_ms,a:snapshot.quotes_valid ? snapshot.directions.SHORT_BINANCE.raw_spread : null,b:snapshot.quotes_valid ? snapshot.directions.LONG_BINANCE.raw_spread : null});if(points.length>120) points.shift();sampleTime=snapshot.timestamp_ms;}
   draw();set("last-update",`· 更新于 ${time(snapshot.timestamp_ms)}`);
 }
 function draw(){

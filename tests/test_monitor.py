@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from copy import deepcopy
 
 import aiohttp
 import pytest
@@ -9,11 +10,51 @@ from test_core import quote
 from test_execution import spec
 
 from arbitrage.config import Settings
+from arbitrage.domain.enums import Direction
 from arbitrage.monitor.controller import MonitorController
 from arbitrage.monitor.server import create_app
 from arbitrage.observability import log_event
 from arbitrage.persistence.sqlite_repository import SQLiteRepository
 from arbitrage.strategy.arbitrage_strategy import ArbitrageStrategy
+
+
+@pytest.mark.parametrize(
+    "now,mt5_ts,status,reason",
+    [
+        (1400, 1000, "RUNNING", "quote_stale"),
+        (999, 1000, "RUNNING", "quote_future"),
+        (1000, 750, "RUNNING", "quote_skew"),
+        (1000, 1000, "STOPPED", "session_inactive"),
+    ],
+)
+async def test_both_spreads_remain_visible_when_entry_is_blocked(
+    tmp_path, now, mt5_ts, status, reason
+):
+    settings = Settings.model_validate({"database": {"path": tmp_path / "paper.db"}})
+    controller = MonitorController(settings)
+    try:
+        async with SQLiteRepository(settings.database.path) as repo:
+            engine = ArbitrageStrategy(settings, spec(), repo)
+            await engine.start(1000)
+            await engine.on_quotes(quote("4416.90", "4416.98"), quote(ts=mt5_ts), now)
+            controller.engine, controller.status = engine, status
+            before = deepcopy(engine.metrics.snapshot())
+            confirmations = {d: deepcopy(engine.confirmations[d].result) for d in Direction}
+            view = controller.snapshot(now=now)
+            assert not view["quotes_valid"]
+            assert view["quote_reason"] == reason
+            assert view["directions"]["SHORT_BINANCE"]["raw_spread"] == "4.36"
+            assert view["directions"]["SHORT_BINANCE"]["edge"] == "0.16"
+            assert view["directions"]["LONG_BINANCE"]["raw_spread"] == "-4.40"
+            assert view["directions"]["LONG_BINANCE"]["edge"] == "-8.60"
+            assert engine.metrics.snapshot() == before
+            assert {d: engine.confirmations[d].result for d in Direction} == confirmations
+            assert engine.order is None
+            engine.mt5_quote = None
+            missing = controller.snapshot(now=now)
+            assert all(d["raw_spread"] is None for d in missing["directions"].values())
+    finally:
+        await controller.close()
 
 
 async def test_start_stop_is_single_run_and_keeps_decimal_quotes(tmp_path):

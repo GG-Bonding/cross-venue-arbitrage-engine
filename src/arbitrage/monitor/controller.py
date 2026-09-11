@@ -120,7 +120,9 @@ class MonitorController:
             }
             if engine:
                 result.update(asdict(engine.confirmations[direction].result))
-            if valid:
+            # Display both observed spreads even when timing rules block entry.
+            # Eligibility remains in quotes_valid; this read does not feed the strategy.
+            if b is not None and m is not None:
                 result.update(asdict(entry_spread(direction, b, m, config.entry.threshold)))
             directions[direction] = result
         view = {
