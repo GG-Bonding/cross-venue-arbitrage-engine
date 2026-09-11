@@ -8,6 +8,16 @@ Binance 和 MT5 的真实下单接口均未实现。`TRADING_MODE=live` 未确�
 
 ## 本地网页监控
 
+挂撤单只读验收命令：
+
+```powershell
+.\.venv\Scripts\python.exe -m arbitrage.audit --database data/mt5-paper.db --output data/paper-audit.json
+```
+
+审计最新会话的订单生命周期、同时挂单数、创建价格、入场条件和撤单原因。
+新订单保存决策瞬间的报价及规则；旧记录证据不足时显示 `limited`，不会用附近报价补算成“通过”。
+有检查失败时返回 `fail` 并以非零状态退出。验收说明见 [docs/PAPER_AUDIT.md](docs/PAPER_AUDIT.md)。
+
 双向实时入场价差显示在顶部报价下方。启动网页行情会话后默认仅监控；选择方向后点击“创建单次挂单”
 或“启动循环挂单”，条件满足后才创建 Paper 模拟单。“停止挂单并撤单”保留行情显示。
 当前没有模拟成交，循环会在模拟撤单后重新等待下一次入场机会；重启行情会话不会自动恢复挂单任务。

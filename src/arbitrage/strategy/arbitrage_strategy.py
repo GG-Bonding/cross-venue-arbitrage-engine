@@ -90,7 +90,25 @@ class ArbitrageStrategy:
     async def _cancel(self, now: int, reason: str) -> None:
         self.maker.request_cancel(self.order, now)
         self.state = StrategyState.CANCELING
-        await self.repo.save_order(self.order, "maker_cancel_requested", now, reason=reason)
+        await self.repo.save_order(
+            self.order,
+            "maker_cancel_requested",
+            now,
+            reason=reason,
+            cancel_evidence={
+                "version": 1,
+                "binance": self.binance_quote,
+                "mt5": self.mt5_quote,
+                "direction_mode": self.direction_mode,
+                "placement_mode": self.placement_mode,
+                "maker": self.settings.maker.model_dump(),
+                "max_quote_age_ms": self.settings.market.max_quote_age_ms,
+                "max_quote_skew_ms": self.settings.market.max_quote_skew_ms,
+                "invalid_since_ms": self.cancel_policy.invalid_since
+                if self.cancel_policy
+                else None,
+            },
+        )
         log_event(
             "maker_cancel_requested", timestamp_ms=now, order_id=self.order.order_id, reason=reason
         )
@@ -243,7 +261,26 @@ class ArbitrageStrategy:
         order = self.maker.place(
             direction, self.binance_quote, self.settings.trading.binance_qty, now
         )
-        await self.repo.save_order(order, "maker_order_created", now)
+        await self.repo.save_order(
+            order,
+            "maker_order_created",
+            now,
+            entry_evidence={
+                "version": 1,
+                "binance": self.binance_quote,
+                "mt5": self.mt5_quote,
+                "spread": signals[direction],
+                "confirmation": asdict(self.confirmations[direction].result),
+                "direction_mode": self.direction_mode,
+                "placement_mode": self.placement_mode,
+                "spec": self.maker.spec,
+                "entry": self.settings.entry.model_dump(),
+                "maker": self.settings.maker.model_dump(),
+                "quantity": self.settings.trading.binance_qty,
+                "max_quote_age_ms": self.settings.market.max_quote_age_ms,
+                "max_quote_skew_ms": self.settings.market.max_quote_skew_ms,
+            },
+        )
         self.order = order
         self.orders_created += 1
         if self.placement_mode == PlacementMode.ONCE:
