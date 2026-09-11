@@ -78,6 +78,16 @@ def create_app(controller: MonitorController) -> web.Application:
             )
         return web.json_response(result)
 
+    async def direction(request):
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict) or set(payload) != {"mode"}:
+                raise ValueError("Expected mode only")
+            controller.select_direction(payload["mode"])
+        except (ValueError, TypeError):
+            return web.json_response({"error": "mode must be a, b or both"}, status=400)
+        return web.json_response(controller.snapshot()["entry_selection"])
+
     async def cleanup(app):
         await controller.close()
 
@@ -85,6 +95,7 @@ def create_app(controller: MonitorController) -> web.Application:
     app.router.add_get("/assets/{name}", asset)
     app.router.add_get("/api/status", status)
     app.router.add_get("/api/history", history)
+    app.router.add_post("/api/direction", direction)
     app.router.add_post("/api/{action:start|stop}", control)
     app.on_cleanup.append(cleanup)
     return app

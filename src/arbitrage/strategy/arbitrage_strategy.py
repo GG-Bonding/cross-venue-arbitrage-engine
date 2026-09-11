@@ -1,7 +1,7 @@
 from dataclasses import asdict
 
 from arbitrage.config import Settings
-from arbitrage.domain.enums import Direction, OrderState, StrategyState
+from arbitrage.domain.enums import Direction, EntryMode, OrderState, StrategyState
 from arbitrage.domain.order import MakerOrder
 from arbitrage.domain.quote import Quote
 from arbitrage.domain.specs import BinanceSpec
@@ -37,6 +37,12 @@ class ArbitrageStrategy:
         self.last_key: tuple | None = None
         self.last_sample_ms: int | None = None
         self.last_guard_reason: str | None = None
+        self.direction_mode = settings.entry.direction_mode
+        self.requested_direction_mode = self.direction_mode
+
+    def request_direction_mode(self, mode: EntryMode) -> None:
+        # The event consumer applies the request; HTTP handlers never mutate orders.
+        self.requested_direction_mode = EntryMode(mode)
 
     async def start(self, now: int) -> None:
         unfinished = await self.repo.unfinished_orders()
@@ -69,6 +75,18 @@ class ArbitrageStrategy:
 
     async def on_timer(self, now: int) -> None:
         # Timers enforce age/timeout but never count as market ticks.
+        if self.direction_mode != self.requested_direction_mode:
+            self.direction_mode = self.requested_direction_mode
+            await self._reset_confirmations(now, "direction_changed")
+            self.last_key = None
+            await self._record("entry_direction_changed", now, mode=self.direction_mode)
+        if (
+            self.order
+            and self.order.state == OrderState.MAKER_PENDING
+            and not self.direction_mode.allows(self.order.direction)
+        ):
+            await self._cancel(now, "direction_disabled")
+            return
         if self.state in (StrategyState.SAFE_MODE, StrategyState.ERROR):
             return
         order = self.order
@@ -156,6 +174,9 @@ class ArbitrageStrategy:
     async def _confirm_and_place(self, signals: dict, now: int) -> None:
         candidates = []
         for direction, confirmation in self.confirmations.items():
+            if not self.direction_mode.allows(direction):
+                confirmation.reset()
+                continue
             previous = confirmation.result
             result = confirmation.update(signals[direction]["edge"], now)
             if result.state != previous.state:

@@ -5,6 +5,8 @@ const reasons = {quote_missing:"等待双边行情",quote_stale:"报价已过期
 const eventNames = {mt5_connected:"MT5 已连接",binance_connected:"Binance 已连接",contract_specifications:"已读取合约规格",paper_reconciliation:"完成本地状态核对",quote_stale:"拒绝过期行情",quote_skew:"拒绝时间差超限行情",quote_future:"拒绝超前时间行情",quote_missing:"等待双边报价",entry_confirmation_start:"开始连续确认",entry_confirmation_reset:"连续确认已复位",entry_confirmed:"入场条件已确认",maker_order_created:"已创建模拟挂单",maker_cancel_requested:"已请求模拟撤单",maker_order_canceled:"模拟撤单已确认",paper_shutdown:"Paper 会话已停止",session_error:"Paper 会话异常"};
 let token = null, busy = false, online = false, current = null, lastHistory = 0, sampleTime = 0;
 const points = [];
+const modeNames = {a:"仅 A · 空 Binance / 多 MT5",b:"仅 B · 多 Binance / 空 MT5",both:"双向自动"};
+eventNames.entry_direction_changed="挂单方向已切换";
 const decimal = value => value === null || value === undefined ? "—" : String(value);
 const fixed = value => value === null || value === undefined ? "—" : Number(value).toFixed(2);
 const ms = value => value === null || value === undefined ? "—" : `${value} ms`;
@@ -20,6 +22,10 @@ function controls(){
   const state = current?.status || "STOPPED";
   $("start").disabled = !online || busy || ["STARTING","RUNNING","STOPPING"].includes(state);
   $("stop").disabled = !online || busy || !["STARTING","RUNNING"].includes(state);
+  for(const button of document.querySelectorAll("[data-mode]")){
+    button.disabled = !online || busy || state === "STOPPING";
+    button.setAttribute("aria-pressed",String(button.dataset.mode === current?.entry_selection?.requested));
+  }
 }
 async function action(name){
   busy = true;controls();
@@ -33,10 +39,22 @@ async function action(name){
 }
 $("start").addEventListener("click",()=>action("start"));
 $("stop").addEventListener("click",()=>action("stop"));
+for(const button of document.querySelectorAll("[data-mode]")) button.addEventListener("click",async()=>{
+  busy=true;controls();
+  try{
+    const selection=await request("/api/direction",{method:"POST",headers:{"X-Control-Token":token,"Content-Type":"application/json"},body:JSON.stringify({mode:button.dataset.mode})});
+    current.entry_selection=selection;renderSelection(current);error(null);
+  }catch(e){error(`方向设置未完成：${e.message}`);}
+  finally{busy=false;controls();}
+});
+function renderSelection(snapshot){
+  const selection=snapshot.entry_selection;
+  set("direction-status",selection.pending ? `正在切换为 ${modeNames[selection.requested]}；当前生效：${modeNames[selection.active]}` : `${selection.active ? "当前生效" : "下次启动使用"}：${modeNames[selection.requested]}`);
+}
 function quoteView(venue, snapshot){
   const q = snapshot[venue], connected = snapshot.connections[venue];
   const age = q ? Math.max(snapshot.timestamp_ms-q.local_ts_ms,snapshot.timestamp_ms-q.exchange_ts_ms) : null;
-  const fresh = connected && age !== null && age >= 0 && age <= snapshot.config.max_quote_age_ms;
+  const fresh = connected && age !== null && snapshot.timestamp_ms >= q.local_ts_ms && snapshot.timestamp_ms >= q.exchange_ts_ms && age <= snapshot.config.max_quote_age_ms;
   set(`${venue}-bid`,decimal(q?.bid));set(`${venue}-ask`,decimal(q?.ask));
   set(`${venue}-latency`,q ? ms(q.local_ts_ms-q.exchange_ts_ms) : "—");
   set(`${venue}-age`,ms(age));
@@ -49,10 +67,13 @@ function quoteView(venue, snapshot){
 }
 function signal(prefix, direction, snapshot){
   const d=snapshot.directions[direction], c=snapshot.config;
+  const mode=snapshot.entry_selection.active || snapshot.entry_selection.requested;
+  const enabled=mode === "both" || mode === prefix;
   set(`${prefix}-spread`,fixed(d.raw_spread));
   set(`${prefix}-edge`,d.edge === null ? "—" : `${Number(d.edge)>=0?"+":""}${fixed(d.edge)}`);
   $(`${prefix}-edge`).className=!snapshot.quotes_valid || d.edge===null ? "" : Number(d.edge)>=0?"positive":"negative";
   set(`${prefix}-state`,snapshot.quotes_valid ? labels[d.state] || d.state : `${reasons[snapshot.quote_reason] || "等待有效行情"} · ${d.raw_spread === null ? "暂无价差" : "价差仅供观察"}`);
+  if(!enabled) set(`${prefix}-state`,"未启用挂单 · 仅观察价差");
   set(`${prefix}-count`,`${d.count} / ${c.min_ticks}`);
   set(`${prefix}-duration`,`${d.duration_ms} / ${c.min_duration_ms} ms`);
   $(`${prefix}-ticks-progress`).max=c.min_ticks;$(`${prefix}-ticks-progress`).value=d.count;
@@ -66,7 +87,7 @@ function renderEvents(events){
     const t=document.createElement("time");t.textContent=time(e.timestamp_ms);
     const content=document.createElement("div"),title=document.createElement("strong"),detail=document.createElement("p");
     title.textContent=eventNames[e.event] || e.event;title.title=e.event;
-    detail.textContent=e.error || [e.reason,e.direction,e.order?.price ? `价格 ${e.order.price}` : null,e.order_id?.slice(0,12)].filter(Boolean).join(" · ") || e.event;
+    detail.textContent=e.error || [e.reason,e.direction,modeNames[e.mode],e.order?.price ? `价格 ${e.order.price}` : null,e.order_id?.slice(0,12)].filter(Boolean).join(" · ") || e.event;
     content.append(title,detail);row.append(t,content);list.append(row);
   }
 }
@@ -84,6 +105,7 @@ function render(snapshot){
   $("session-dot").className=`status-dot ${snapshot.status === "RUNNING"?"running":snapshot.status === "ERROR"?"error":""}`;
   set("binance-symbol",c.symbols.binance);set("mt5-symbol",c.symbols.mt5);
   quoteView("binance",snapshot);quoteView("mt5",snapshot);
+  renderSelection(snapshot);
   set("entry-threshold",fixed(c.entry_threshold));set("cancel-threshold",fixed(c.cancel_threshold));
   set("confirmation-rule",`${c.min_ticks} ticks + ${c.min_duration_ms} ms`);set("age-limit",ms(c.max_quote_age_ms));set("skew-limit",ms(c.max_quote_skew_ms));set("pending-limit",ms(c.max_pending_ms));set("target-qty",c.binance_qty);
   set("quote-validity",snapshot.quotes_valid ? "双边报价有效" : reasons[snapshot.quote_reason] || "等待有效行情");

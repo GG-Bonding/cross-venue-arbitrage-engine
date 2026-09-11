@@ -5,6 +5,8 @@ symbol:
   mt5: XAUUSD
 
 entry:
+  # a: short Binance / long MT5; b: long Binance / short MT5; both: automatic.
+  direction_mode: both
   threshold: "4.20"
   confirmation:
     min_ticks: 3

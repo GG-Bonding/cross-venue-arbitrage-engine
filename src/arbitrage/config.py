@@ -6,6 +6,8 @@ from typing import Annotated, Literal, Self
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from arbitrage.domain.enums import EntryMode
+
 PositiveDecimal = Annotated[Decimal, Field(gt=0, allow_inf_nan=False)]
 
 
@@ -19,6 +21,7 @@ class ConfirmationConfig(ConfigModel):
 
 
 class EntryConfig(ConfigModel):
+    direction_mode: EntryMode = EntryMode.BOTH
     threshold: PositiveDecimal = Decimal("4.20")
     confirmation: ConfirmationConfig = Field(default_factory=ConfirmationConfig)
 

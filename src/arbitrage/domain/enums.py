@@ -6,6 +6,22 @@ class Direction(StrEnum):
     LONG_BINANCE = "LONG_BINANCE"
 
 
+class EntryMode(StrEnum):
+    BOTH = "both"
+    A = "a"
+    B = "b"
+
+    def allows(self, direction: Direction) -> bool:
+        return (
+            self == self.BOTH
+            or direction
+            == {
+                self.A: Direction.SHORT_BINANCE,
+                self.B: Direction.LONG_BINANCE,
+            }[self]
+        )
+
+
 class OrderState(StrEnum):
     MAKER_PENDING = "MAKER_PENDING"
     CANCELING = "CANCELING"

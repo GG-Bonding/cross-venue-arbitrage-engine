@@ -5,7 +5,7 @@ from collections import deque
 from dataclasses import asdict
 
 from arbitrage.config import Settings
-from arbitrage.domain.enums import Direction
+from arbitrage.domain.enums import Direction, EntryMode
 from arbitrage.market.runtime import run_market
 from arbitrage.observability import dumps, now_ms
 from arbitrage.risk.quote_guard import QuoteGuard
@@ -62,8 +62,17 @@ class MonitorController:
 
     def _on_engine(self, engine) -> None:
         self.engine = engine
+        engine.request_direction_mode(self.settings.entry.direction_mode)
         if not self.stop_event.is_set():
             self.status = "RUNNING"
+
+    def select_direction(self, mode: str) -> None:
+        selected = EntryMode(mode)
+        self.settings = self.settings.model_copy(
+            update={"entry": self.settings.entry.model_copy(update={"direction_mode": selected})}
+        )
+        if self.engine:
+            self.engine.request_direction_mode(selected)
 
     async def _run(self) -> None:
         try:
@@ -128,6 +137,13 @@ class MonitorController:
         view = {
             "timestamp_ms": now,
             "mode": "paper",
+            "entry_selection": {
+                "requested": config.entry.direction_mode,
+                "active": engine.direction_mode if engine and active else None,
+                "pending": bool(
+                    engine and active and engine.direction_mode != config.entry.direction_mode
+                ),
+            },
             "status": self.status,
             "error": self.error,
             "state": engine.state if engine else "IDLE",
@@ -143,6 +159,7 @@ class MonitorController:
             "config": {
                 "symbols": {"binance": config.symbol.binance, "mt5": config.symbol.mt5},
                 "entry_threshold": config.entry.threshold,
+                "direction_mode": config.entry.direction_mode,
                 "cancel_threshold": config.maker.cancel_threshold,
                 "min_ticks": config.entry.confirmation.min_ticks,
                 "min_duration_ms": config.entry.confirmation.min_duration_ms,

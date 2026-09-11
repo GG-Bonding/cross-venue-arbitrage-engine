@@ -83,6 +83,13 @@ async def test_start_stop_is_single_run_and_keeps_decimal_quotes(tmp_path):
         assert view["quotes_valid"] is True
         assert view["binance"]["ask"] == "4416.98"
         assert view["directions"]["SHORT_BINANCE"]["edge"] == "0.16"
+        controller.select_direction("b")
+        selection = controller.snapshot(now=1000)["entry_selection"]
+        assert selection == {"requested": "b", "active": "both", "pending": True}
+        await controller.engine.on_timer(1001)
+        selection = controller.snapshot(now=1001)["entry_selection"]
+        assert selection == {"requested": "b", "active": "b", "pending": False}
+        assert controller.snapshot(now=1001)["directions"]["SHORT_BINANCE"]["raw_spread"] == "4.36"
         assert controller.snapshot(now=1400)["quotes_valid"] is False
         controller.stop()
         assert controller.start() is False  # STOPPING still owns the session.
@@ -171,11 +178,25 @@ async def test_dashboard_api_origin_controls_and_read_only_history(tmp_path):
             async with client.post(base + "/api/start", headers=headers) as response:
                 assert response.status == 403
             headers["Origin"] = base
+            async with client.post(base + "/api/direction", json={"mode": "b"}) as response:
+                assert response.status == 403
+            for invalid in ({"mode": "invalid"}, {"mode": "a", "extra": 1}, [], {"mode": []}):
+                async with client.post(
+                    base + "/api/direction", headers=headers, json=invalid
+                ) as response:
+                    assert response.status == 400
+            async with client.post(
+                base + "/api/direction", headers=headers, json={"mode": "b"}
+            ) as response:
+                assert response.status == 200
+                assert (await response.json())["requested"] == "b"
+            assert controller.settings.entry.direction_mode == "b"
             async with client.post(base + "/api/start", headers=headers) as response:
                 assert response.status == 200
             async with client.post(base + "/api/stop", headers=headers) as response:
                 assert response.status == 200
             await controller.wait_closed()
+            assert controller.snapshot()["entry_selection"]["requested"] == "b"
             async with client.get(
                 base + "/api/status", headers={"Host": "unrelated.example"}
             ) as response:
