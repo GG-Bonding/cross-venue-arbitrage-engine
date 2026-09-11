@@ -8,7 +8,7 @@ from arbitrage.market.mt5_market import MT5Market
 from arbitrage.observability import log_event, now_ms
 from arbitrage.persistence.session_lock import SessionLock
 from arbitrage.persistence.sqlite_repository import SQLiteRepository
-from arbitrage.strategy.arbitrage_strategy import ArbitrageStrategy
+from arbitrage.strategy.manual_orders import ManualOrderStrategy
 
 
 async def consume_quotes(engine, queue: asyncio.Queue, stop: asyncio.Event, *, clock=now_ms):
@@ -60,7 +60,7 @@ async def _run_market(settings, *, duration, stop, on_engine) -> None:
             mt5=mt5.spec,
             binance_underlying_per_qty=settings.trading.binance_underlying_per_qty,
         )
-        engine = ArbitrageStrategy(settings, spec, repo)
+        engine = ManualOrderStrategy(settings, spec, repo)
         await engine.start(now_ms())
         if on_engine is not None:
             on_engine(engine)

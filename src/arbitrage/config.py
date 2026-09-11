@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from arbitrage.domain.enums import EntryMode
 
 PositiveDecimal = Annotated[Decimal, Field(gt=0, allow_inf_nan=False)]
+FiniteDecimal = Annotated[Decimal, Field(allow_inf_nan=False, max_digits=18, decimal_places=8)]
 
 
 class ConfigModel(BaseModel):
@@ -22,12 +23,12 @@ class ConfirmationConfig(ConfigModel):
 
 class EntryConfig(ConfigModel):
     direction_mode: EntryMode = EntryMode.BOTH
-    threshold: PositiveDecimal = Decimal("4.20")
+    threshold: FiniteDecimal = Decimal("4.20")
     confirmation: ConfirmationConfig = Field(default_factory=ConfirmationConfig)
 
 
 class MakerConfig(ConfigModel):
-    cancel_threshold: PositiveDecimal = Decimal("4.00")
+    cancel_threshold: FiniteDecimal = Decimal("4.00")
     cancel_confirm_ms: int = Field(default=50, ge=1)
     max_pending_ms: int = Field(default=2000, ge=1)
     paper_cancel_latency_ms: int = Field(default=20, ge=1)

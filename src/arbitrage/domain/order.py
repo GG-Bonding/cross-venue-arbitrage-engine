@@ -16,3 +16,4 @@ class MakerOrder:
     cancel_requested_at_ms: int | None = None
     time_in_force: str = "GTX"
     mode: str = "paper"
+    conditional_id: str | None = None

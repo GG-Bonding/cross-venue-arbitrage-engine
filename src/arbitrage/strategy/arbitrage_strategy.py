@@ -257,10 +257,14 @@ class ArbitrageStrategy:
         # A control request can arrive while confirmation events are being persisted.
         if not self.placement_enabled() or not self.requested_direction_mode.allows(direction):
             return
+        await self._place_direction(direction, signals, now)
+
+    async def _place_direction(self, direction, signals, now, *, condition=None) -> None:
         self.state = StrategyState.PLACING_MAKER
         order = self.maker.place(
             direction, self.binance_quote, self.settings.trading.binance_qty, now
         )
+        order.conditional_id = condition.request_id if condition else None
         await self.repo.save_order(
             order,
             "maker_order_created",
@@ -279,6 +283,7 @@ class ArbitrageStrategy:
                 "quantity": self.settings.trading.binance_qty,
                 "max_quote_age_ms": self.settings.market.max_quote_age_ms,
                 "max_quote_skew_ms": self.settings.market.max_quote_skew_ms,
+                "conditional_order": condition,
             },
         )
         self.order = order

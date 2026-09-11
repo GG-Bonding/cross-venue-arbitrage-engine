@@ -38,6 +38,17 @@ def check_entry(order: dict, evidence: dict, timestamp: int) -> list[str]:
     mode = evidence["direction_mode"]
     check(mode == "both" or mode == ("a" if sell else "b"), "direction_enabled")
     check(evidence["placement_mode"] in {"once", "loop"}, "placement_enabled")
+    if order.get("conditional_id"):
+        condition = evidence.get("conditional_order")
+        check(
+            bool(condition)
+            and condition["request_id"] == order["conditional_id"]
+            and condition["direction"] == order["direction"]
+            and Decimal(condition["entry_threshold"]) == Decimal(evidence["entry"]["threshold"])
+            and Decimal(condition["quantity"]) == Decimal(evidence["quantity"])
+            and condition["created_at_ms"] <= timestamp,
+            "manual_condition_link",
+        )
     for q in (b, m):
         for field in ("exchange_ts_ms", "local_ts_ms"):
             check(0 <= timestamp - q[field] <= evidence["max_quote_age_ms"], "quote_age")

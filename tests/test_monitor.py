@@ -17,6 +17,7 @@ from arbitrage.monitor.server import create_app
 from arbitrage.observability import log_event
 from arbitrage.persistence.sqlite_repository import SQLiteRepository
 from arbitrage.strategy.arbitrage_strategy import ArbitrageStrategy
+from arbitrage.strategy.manual_orders import ManualOrderStrategy
 
 
 @pytest.mark.parametrize(
@@ -185,19 +186,18 @@ async def test_dashboard_api_origin_controls_and_read_only_history(tmp_path):
                 async with client.post(
                     base + "/api/direction", headers=headers, json=invalid
                 ) as response:
-                    assert response.status == 400
+                    assert response.status == 410
             async with client.post(
                 base + "/api/direction", headers=headers, json={"mode": "b"}
             ) as response:
-                assert response.status == 200
-                assert (await response.json())["requested"] == "b"
-            assert controller.settings.entry.direction_mode == "b"
+                assert response.status == 410
+            assert controller.settings.entry.direction_mode == "both"
             async with client.post(base + "/api/start", headers=headers) as response:
                 assert response.status == 200
             async with client.post(base + "/api/stop", headers=headers) as response:
                 assert response.status == 200
             await controller.wait_closed()
-            assert controller.snapshot()["entry_selection"]["requested"] == "b"
+            assert controller.snapshot()["entry_selection"]["requested"] == "both"
             async with client.get(
                 base + "/api/status", headers={"Host": "unrelated.example"}
             ) as response:
@@ -220,17 +220,22 @@ async def test_history_reads_persisted_paper_orders(tmp_path):
                 assert history["orders"][0]["filled_qty"] == "0"
 
 
-async def test_placement_api_validates_controls_and_deduplicates(tmp_path):
+async def test_manual_conditions_api_validates_controls_and_deduplicates(tmp_path):
     ready = asyncio.Event()
 
     async def runner(config, *, stop, on_engine):
         async with SQLiteRepository(config.database.path) as repo:
-            engine = ArbitrageStrategy(config, spec(), repo)
+            engine = ManualOrderStrategy(config, spec(), repo)
             await engine.start(1000)
             on_engine(engine)
             await engine.on_timer(1000)
             ready.set()
-            await stop.wait()
+            while not stop.is_set():
+                await engine.on_timer(1000)
+                try:
+                    await asyncio.wait_for(stop.wait(), 0.01)
+                except TimeoutError:
+                    pass
             await engine.shutdown(2000)
 
     settings = Settings.model_validate({"database": {"path": tmp_path / "paper.db"}})
@@ -238,36 +243,53 @@ async def test_placement_api_validates_controls_and_deduplicates(tmp_path):
         async with aiohttp.ClientSession() as client:
             view = await (await client.get(base + "/api/status")).json()
             headers = {"Origin": base, "X-Control-Token": view["control_token"]}
-            payload = {"mode": "once", "request_id": str(uuid4())}
-            async with client.post(base + "/api/placement", json=payload) as response:
+            payload = {
+                "request_id": str(uuid4()),
+                "direction": "SHORT_BINANCE",
+                "entry_threshold": "4.2",
+                "cancel_threshold": "4",
+                "quantity": "1",
+            }
+            async with client.post(base + "/api/conditions", json=payload) as response:
                 assert response.status == 403
             async with client.post(
-                base + "/api/placement", headers=headers, json=payload
+                base + "/api/conditions", headers=headers, json=payload
             ) as response:
-                assert response.status == 409  # No quote session yet.
+                assert response.status == 400  # No quote session yet.
+            async with client.post(
+                base + "/api/placement", headers=headers, json={"mode": "loop"}
+            ) as response:
+                assert response.status == 410
             controller.start()
             await asyncio.wait_for(ready.wait(), 1)
-            for invalid in ({}, {"mode": "once", "request_id": "bad"}, {**payload, "mode": []}):
+            for invalid in (
+                {},
+                {**payload, "request_id": "bad"},
+                {**payload, "entry_threshold": "NaN"},
+                {**payload, "cancel_threshold": "5"},
+                {**payload, "direction": "both"},
+            ):
                 async with client.post(
-                    base + "/api/placement", headers=headers, json=invalid
+                    base + "/api/conditions", headers=headers, json=invalid
                 ) as response:
                     assert response.status == 400
             for _ in range(2):
                 async with client.post(
-                    base + "/api/placement", headers=headers, json=payload
+                    base + "/api/conditions", headers=headers, json=payload
                 ) as response:
                     assert response.status == 200
-                    assert (await response.json())["requested"] == "once"
+                    assert (await response.json())["state"] == "WAITING"
+            assert len(controller.snapshot()["conditions"]) == 1
             async with client.post(
-                base + "/api/placement",
+                base + "/api/conditions",
                 headers=headers,
-                json={"mode": "loop", "request_id": str(uuid4())},
+                json={**payload, "quantity": "2"},
             ) as response:
-                assert response.status == 409
+                assert response.status == 400
             async with client.post(
-                base + "/api/placement",
+                base + f"/api/conditions/{payload['request_id']}/cancel",
                 headers=headers,
-                json={"mode": "paused", "request_id": str(uuid4())},
             ) as response:
                 assert response.status == 200
+                assert (await response.json())["state"] == "CANCELED"
             assert controller.status == "RUNNING"

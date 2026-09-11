@@ -5,7 +5,7 @@ symbol:
   mt5: XAUUSD
 
 entry:
-  # a: short Binance / long MT5; b: long Binance / short MT5; both: automatic.
+  # Legacy offline demo default. Real-market orders use each manual request's direction.
   direction_mode: both
   threshold: "4.20"
   confirmation:

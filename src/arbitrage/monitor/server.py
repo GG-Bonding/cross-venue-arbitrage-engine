@@ -3,12 +3,13 @@ import json
 import secrets
 import sqlite3
 from importlib.resources import files
+from uuid import UUID
 
 from aiohttp import web
 
 from arbitrage.config import Settings
 from arbitrage.monitor.controller import MonitorController
-from arbitrage.observability import log_event
+from arbitrage.observability import dumps, log_event
 
 
 def read_history(path) -> dict:
@@ -78,29 +79,25 @@ def create_app(controller: MonitorController) -> web.Application:
             )
         return web.json_response(result)
 
-    async def direction(request):
-        try:
-            payload = await request.json()
-            if not isinstance(payload, dict) or set(payload) != {"mode"}:
-                raise ValueError("Expected mode only")
-            controller.select_direction(payload["mode"])
-        except (ValueError, TypeError):
-            return web.json_response({"error": "mode must be a, b or both"}, status=400)
-        return web.json_response(controller.snapshot()["entry_selection"])
+    async def legacy_control(request):
+        return web.json_response(
+            {"error": "全局自动挂单已停用，请刷新页面并手动创建条件单"}, status=410
+        )
 
-    async def placement(request):
+    async def condition_control(request):
         try:
-            payload = await request.json()
-            if not isinstance(payload, dict) or set(payload) != {"mode", "request_id"}:
-                raise ValueError("Expected mode and request_id")
-            if not isinstance(payload["request_id"], str):
-                raise ValueError("request_id must be a UUID string")
-            controller.control_placement(payload["mode"], payload["request_id"])
-        except (ValueError, TypeError, AttributeError):
-            return web.json_response({"error": "Invalid placement mode or request_id"}, status=400)
-        except RuntimeError as exc:
-            return web.json_response({"error": str(exc)}, status=409)
-        return web.json_response(controller.snapshot()["placement"])
+            action = request.match_info.get("action", "create")
+            payload = (
+                await request.json() if action == "create" else str(UUID(request.match_info["id"]))
+            )
+            result = await controller.condition_command(action, payload)
+        except (ValueError, TypeError, AttributeError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        except TimeoutError:
+            return web.json_response(
+                {"error": "请求仍在处理，请查看条件单列表后使用相同编号重试"}, status=504
+            )
+        return web.json_response(json.loads(dumps(result)))
 
     async def cleanup(app):
         await controller.close()
@@ -109,8 +106,10 @@ def create_app(controller: MonitorController) -> web.Application:
     app.router.add_get("/assets/{name}", asset)
     app.router.add_get("/api/status", status)
     app.router.add_get("/api/history", history)
-    app.router.add_post("/api/direction", direction)
-    app.router.add_post("/api/placement", placement)
+    app.router.add_post("/api/direction", legacy_control)
+    app.router.add_post("/api/placement", legacy_control)
+    app.router.add_post("/api/conditions", condition_control)
+    app.router.add_post("/api/conditions/{id}/{action:cancel|resume}", condition_control)
     app.router.add_post("/api/{action:start|stop}", control)
     app.on_cleanup.append(cleanup)
     return app

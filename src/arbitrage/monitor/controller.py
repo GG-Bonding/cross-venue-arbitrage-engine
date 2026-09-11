@@ -109,6 +109,12 @@ class MonitorController:
         else:
             self.status = "STOPPED"
 
+    async def condition_command(self, action: str, payload) -> dict:
+        if self.status != "RUNNING" or self.engine is None or not hasattr(self.engine, "enqueue"):
+            raise ValueError("请先启动行情监控")
+        future = self.engine.enqueue(action, payload)
+        return await asyncio.wait_for(asyncio.shield(future), timeout=10)
+
     def stop(self) -> None:
         if self.task is not None and not self.task.done():
             self.status = "STOPPING"
@@ -162,6 +168,11 @@ class MonitorController:
                 ),
             },
             "status": self.status,
+            "manual_only": True,
+            "conditions": engine.condition_views(now)
+            if engine and hasattr(engine, "condition_views")
+            else [],
+            "active_condition_id": getattr(engine, "active_condition_id", None),
             "placement": {
                 "mode": engine.placement_mode if engine else PlacementMode.PAUSED,
                 "requested": engine.requested_placement_mode if engine else PlacementMode.PAUSED,

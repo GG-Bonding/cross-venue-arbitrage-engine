@@ -5,36 +5,30 @@ const reasons = {quote_missing:"等待双边行情",quote_stale:"报价已过期
 const eventNames = {mt5_connected:"MT5 已连接",binance_connected:"Binance 已连接",contract_specifications:"已读取合约规格",paper_reconciliation:"完成本地状态核对",quote_stale:"拒绝过期行情",quote_skew:"拒绝时间差超限行情",quote_future:"拒绝超前时间行情",quote_missing:"等待双边报价",entry_confirmation_start:"开始连续确认",entry_confirmation_reset:"连续确认已复位",entry_confirmed:"入场条件已确认",maker_order_created:"已创建模拟挂单",maker_cancel_requested:"已请求模拟撤单",maker_order_canceled:"模拟撤单已确认",paper_shutdown:"Paper 会话已停止",session_error:"Paper 会话异常"};
 let token = null, busy = false, online = false, current = null, lastHistory = 0, sampleTime = 0;
 const points = [];
-const modeNames = {a:"仅 A · 空 Binance / 多 MT5",b:"仅 B · 多 Binance / 空 MT5",both:"双向自动"};
+let formInitialized=false, actionError=null, pendingDraft=null;
+const conditionLabels={WAITING:"等待条件",EXECUTING:"模拟挂单中",CANCELING:"正在撤单",DONE:"本次结束 · 模拟单已撤",CANCELED:"已取消",PAUSED:"已暂停",REVIEW:"中断待核对",FAILED:"执行失败"};
+Object.assign(eventNames,{conditional_created:"已创建手动条件单",conditional_reserved:"条件满足 · 占用执行槽",conditional_executing:"条件单正在执行",conditional_cycle_finished:"条件单本轮结束",conditional_cancel_requested:"条件单取消请求",conditional_resumed:"条件单已恢复",conditional_paused:"条件单已暂停"});
 eventNames.entry_direction_changed="挂单方向已切换";
-eventNames.placement_mode_changed="挂单任务已切换";
-eventNames.placement_once_completed="单次挂单任务已结束";
-const placementNames={paused:"仅监控",once:"单次挂单",loop:"循环挂单"};
 const decimal = value => value === null || value === undefined ? "—" : String(value);
 const fixed = value => value === null || value === undefined ? "—" : Number(value).toFixed(2);
 const ms = value => value === null || value === undefined ? "—" : `${value} ms`;
 const time = value => value ? new Date(value).toLocaleTimeString("zh-CN",{hour12:false}) : "—";
 function set(id, value){$(id).textContent = value;}
-function error(message){$("error").hidden = !message;set("error",message || "");}
+function showError(message){$("error").hidden = !message;set("error",message || "");}
+function error(message){actionError=message;showError(message);}
 async function request(path, options = {}){
-  const response = await fetch(path,{...options,cache:"no-store",signal:AbortSignal.timeout(4000)});
-  if(!response.ok) throw new Error(`请求失败 (${response.status})`);
-  return response.json();
+  const response = await fetch(path,{...options,cache:"no-store",signal:AbortSignal.timeout(options.method === "POST" ? 15000 : 4000)});
+  const data=await response.json();
+  if(!response.ok) throw new Error(data.error || `请求失败 (${response.status})`);
+  return data;
 }
 function controls(){
-  const state = current?.status || "STOPPED";
-  $("start").disabled = !online || busy || ["STARTING","RUNNING","STOPPING"].includes(state);
-  $("stop").disabled = !online || busy || !["STARTING","RUNNING"].includes(state);
-  for(const button of document.querySelectorAll("[data-mode]")){
-    button.disabled = !online || busy || state === "STOPPING";
-    button.setAttribute("aria-pressed",String(button.dataset.mode === current?.entry_selection?.requested));
-  }
-  const plan=current?.placement;
-  const ready=online && !busy && state === "RUNNING" && !["SAFE_MODE","ERROR"].includes(current?.state);
-  const idle=plan?.mode === "paused" && plan?.requested === "paused" && !current?.order;
-  $("placement-once").disabled=!ready || !idle;
-  $("placement-loop").disabled=!ready || !idle;
-  $("placement-pause").disabled=!online || busy || state !== "RUNNING" || idle;
+  const state=current?.status || "STOPPED";
+  $("start").disabled=!online || busy || ["STARTING","RUNNING","STOPPING"].includes(state);
+  $("stop").disabled=!online || busy || !["STARTING","RUNNING"].includes(state);
+  const running=online && !busy && state === "RUNNING";
+  $("condition-create").disabled=!running || ["SAFE_MODE","ERROR"].includes(current?.state);
+  for(const button of document.querySelectorAll("[data-condition-action]")) button.disabled=!running;
 }
 async function action(name){
   busy = true;controls();
@@ -48,37 +42,52 @@ async function action(name){
 }
 $("start").addEventListener("click",()=>action("start"));
 $("stop").addEventListener("click",()=>action("stop"));
-for(const button of document.querySelectorAll("[data-mode]")) button.addEventListener("click",async()=>{
+$("condition-form").addEventListener("submit",async event=>{
+  event.preventDefault();
+  if($("condition-create").disabled) return;
+  const fields={direction:$("condition-direction").value,entry_threshold:$("condition-entry").value,cancel_threshold:$("condition-cancel").value,quantity:$("condition-quantity").value,repeat:$("condition-repeat").checked};
+  const signature=JSON.stringify(fields);
+  if(!pendingDraft || pendingDraft.signature !== signature) pendingDraft={signature,id:crypto.randomUUID()};
   busy=true;controls();
   try{
-    const selection=await request("/api/direction",{method:"POST",headers:{"X-Control-Token":token,"Content-Type":"application/json"},body:JSON.stringify({mode:button.dataset.mode})});
-    current.entry_selection=selection;renderSelection(current);error(null);
-  }catch(e){error(`方向设置未完成：${e.message}`);}
+    await request("/api/conditions",{method:"POST",headers:{"X-Control-Token":token,"Content-Type":"application/json"},body:JSON.stringify({...fields,request_id:pendingDraft.id})});
+    pendingDraft=null;error(null);
+    current=await request("/api/status");render(current);
+  }catch(e){error(`条件单未确认：${e.message}`);}
   finally{busy=false;controls();}
 });
-function renderSelection(snapshot){
-  const selection=snapshot.entry_selection;
-  set("direction-status",selection.pending ? `正在切换为 ${modeNames[selection.requested]}；当前生效：${modeNames[selection.active]}` : `${selection.active ? "当前生效" : "下次启动使用"}：${modeNames[selection.requested]}`);
+async function conditionAction(id,action){
+  busy=true;controls();
+  try{
+    await request(`/api/conditions/${encodeURIComponent(id)}/${action}`,{method:"POST",headers:{"X-Control-Token":token}});
+    error(null);current=await request("/api/status");render(current);
+  }catch(e){error(e.message);}
+  finally{busy=false;controls();}
 }
-for(const [id,mode] of [["placement-once","once"],["placement-loop","loop"],["placement-pause","paused"]]) $(id).addEventListener("click",async()=>{
-  busy=true;controls();
-  try{
-    current.placement=await request("/api/placement",{method:"POST",headers:{"X-Control-Token":token,"Content-Type":"application/json"},body:JSON.stringify({mode,request_id:crypto.randomUUID()})});
-    renderPlacement(current);error(null);
-  }catch(e){error(`挂单任务未确认：${e.message}，请查看当前任务状态后操作。`);}
-  finally{busy=false;controls();}
-});
-function renderPlacement(snapshot){
-  const plan=snapshot.placement;
-  let message;
-  if(snapshot.status !== "RUNNING") message="先启动行情监控，再创建挂单任务";
-  else if(plan.pending) message=`正在切换：${placementNames[plan.requested]}`;
-  else if(snapshot.order) message=`${placementNames[plan.mode]} · ${labels[snapshot.order.state] || snapshot.order.state}`;
-  else if(plan.mode === "paused") message="仅监控 · 点击按钮创建单次或循环挂单任务";
-  else if(!snapshot.quotes_valid) message=`${placementNames[plan.mode]}等待中 · ${reasons[snapshot.quote_reason] || "等待有效行情"}`;
-  else message=`${placementNames[plan.mode]}等待中 · 等待所选方向达到阈值并完成连续确认`;
-  if(snapshot.state === "SAFE_MODE") message="安全模式 · 请先核对未完成订单，禁止新挂单";
-  set("placement-status",`${message} · 本次监控已创建 ${plan.orders_created} 笔模拟挂单`);
+function renderConditions(snapshot){
+  if(!formInitialized){
+    $("condition-entry").value=snapshot.config.entry_threshold;
+    $("condition-cancel").value=snapshot.config.cancel_threshold;
+    $("condition-quantity").value=snapshot.config.binance_qty;
+    formInitialized=true;
+  }
+  const body=$("conditions-body");body.replaceChildren();
+  const conditions=snapshot.conditions || [];
+  const order=snapshot.order;
+  set("execution-slot",order ? `执行槽已占用 · 条件单 ${order.conditional_id?.slice(0,8) || "历史订单"} · ${labels[order.state]} · 其余条件单等待` : "执行槽空闲 · 只执行手动创建且满足条件的单子");
+  if(!conditions.length){const row=body.insertRow(),cell=row.insertCell();cell.colSpan=9;cell.className="empty-row";cell.textContent="尚无手动条件单，系统不会自动创建订单。";return;}
+  for(const c of conditions){
+    let status=conditionLabels[c.state] || c.state;
+    if(c.state === "WAITING"){
+      status += order ? " · 等待执行槽" : !snapshot.quotes_valid ? ` · ${reasons[snapshot.quote_reason] || "等待有效行情"}` : ` · ${c.confirmation.count}/${snapshot.config.min_ticks} Tick · ${c.confirmation.duration_ms}/${snapshot.config.min_duration_ms} ms`;
+    }
+    const row=body.insertRow();row.dataset.conditionId=c.request_id;
+    for(const value of [`${c.request_id.slice(0,8)} / ${c.queue_seq}`,c.direction === "SHORT_BINANCE" ? "A" : "B",c.entry_threshold,c.cancel_threshold,c.quantity,c.repeat?"是":"否",c.execution_count,status]){const cell=row.insertCell();cell.textContent=String(value);}
+    const actions=row.insertCell();
+    for(const action of c.state === "PAUSED" ? ["resume","cancel"] : ["WAITING","EXECUTING","CANCELING","REVIEW"].includes(c.state) ? ["cancel"] : []){
+      const button=document.createElement("button");button.textContent=action === "resume" ? "恢复此单" : "取消此单";button.dataset.conditionAction=action;button.addEventListener("click",()=>conditionAction(c.request_id,action));actions.append(button);
+    }
+  }
 }
 function quoteView(venue, snapshot){
   const q = snapshot[venue], connected = snapshot.connections[venue];
@@ -94,20 +103,9 @@ function quoteView(venue, snapshot){
     set("binance-bid-qty",`数量 ${decimal(q?.bid_qty)}`);set("binance-ask-qty",`数量 ${decimal(q?.ask_qty)}`);
   }
 }
-function signal(prefix, direction, snapshot){
-  const d=snapshot.directions[direction], c=snapshot.config;
-  const mode=snapshot.entry_selection.active || snapshot.entry_selection.requested;
-  const enabled=mode === "both" || mode === prefix;
-  set(`${prefix}-spread`,fixed(d.raw_spread));
-  set(`${prefix}-edge`,d.edge === null ? "—" : `${Number(d.edge)>=0?"+":""}${fixed(d.edge)}`);
-  $(`${prefix}-edge`).className=!snapshot.quotes_valid || d.edge===null ? "" : Number(d.edge)>=0?"positive":"negative";
-  set(`${prefix}-state`,snapshot.quotes_valid ? labels[d.state] || d.state : `${reasons[snapshot.quote_reason] || "等待有效行情"} · ${d.raw_spread === null ? "暂无价差" : "价差仅供观察"}`);
-  if(!enabled) set(`${prefix}-state`,"未启用挂单 · 仅观察价差");
-  else if(snapshot.quotes_valid && snapshot.placement.mode === "paused") set(`${prefix}-state`,"仅监控 · 未启动挂单");
-  set(`${prefix}-count`,`${d.count} / ${c.min_ticks}`);
-  set(`${prefix}-duration`,`${d.duration_ms} / ${c.min_duration_ms} ms`);
-  $(`${prefix}-ticks-progress`).max=c.min_ticks;$(`${prefix}-ticks-progress`).value=d.count;
-  $(`${prefix}-time-progress`).max=Math.max(c.min_duration_ms,1);$(`${prefix}-time-progress`).value=d.duration_ms;
+function signal(prefix,direction,snapshot){
+  set(`${prefix}-spread`,fixed(snapshot.directions[direction].raw_spread));
+  set(`${prefix}-state`,snapshot.quotes_valid ? "实时报价 · 条件按各单独立判断" : `${reasons[snapshot.quote_reason] || "等待行情"} · 仅供观察`);
 }
 function renderEvents(events){
   const list=$("events-list");list.replaceChildren();
@@ -117,7 +115,7 @@ function renderEvents(events){
     const t=document.createElement("time");t.textContent=time(e.timestamp_ms);
     const content=document.createElement("div"),title=document.createElement("strong"),detail=document.createElement("p");
     title.textContent=eventNames[e.event] || e.event;title.title=e.event;
-    detail.textContent=e.error || [e.reason,e.direction,modeNames[e.mode],placementNames[e.placement],e.order?.price ? `价格 ${e.order.price}` : null,e.order_id?.slice(0,12)].filter(Boolean).join(" · ") || e.event;
+    detail.textContent=e.error || [e.reason,e.direction,e.condition ? `条件 ${e.condition.request_id.slice(0,8)} · ${conditionLabels[e.condition.state] || e.condition.state}` : null,e.order?.price ? `价格 ${e.order.price}` : null,e.order_id?.slice(0,12)].filter(Boolean).join(" · ") || e.event;
     content.append(title,detail);row.append(t,content);list.append(row);
   }
 }
@@ -135,17 +133,15 @@ function render(snapshot){
   $("session-dot").className=`status-dot ${snapshot.status === "RUNNING"?"running":snapshot.status === "ERROR"?"error":""}`;
   set("binance-symbol",c.symbols.binance);set("mt5-symbol",c.symbols.mt5);
   quoteView("binance",snapshot);quoteView("mt5",snapshot);
-  renderSelection(snapshot);
-  renderPlacement(snapshot);
-  set("entry-threshold",fixed(c.entry_threshold));set("cancel-threshold",fixed(c.cancel_threshold));
-  set("confirmation-rule",`${c.min_ticks} ticks + ${c.min_duration_ms} ms`);set("age-limit",ms(c.max_quote_age_ms));set("skew-limit",ms(c.max_quote_skew_ms));set("pending-limit",ms(c.max_pending_ms));set("target-qty",c.binance_qty);
+  renderConditions(snapshot);
+  set("confirmation-rule",`${c.min_ticks} ticks + ${c.min_duration_ms} ms`);set("age-limit",ms(c.max_quote_age_ms));set("skew-limit",ms(c.max_quote_skew_ms));set("pending-limit",ms(c.max_pending_ms));
   set("quote-validity",snapshot.quotes_valid ? "双边报价有效" : reasons[snapshot.quote_reason] || "等待有效行情");
   $("quote-validity").className=`validity ${snapshot.quotes_valid?"good":""}`;
   set("quote-skew",snapshot.binance && snapshot.mt5 ? ms(Math.abs(snapshot.binance.exchange_ts_ms-snapshot.mt5.exchange_ts_ms)):"—");
   signal("a","SHORT_BINANCE",snapshot);signal("b","LONG_BINANCE",snapshot);
   const o=snapshot.order;
   set("current-order",o?`当前 ${o.direction === "SHORT_BINANCE"?"SELL":"BUY"} · ${o.price} × ${o.quantity} · ${labels[o.state]||o.state}`:"当前没有挂单");
-  renderEvents(snapshot.events);error(snapshot.error);
+  renderEvents(snapshot.events);showError(snapshot.error || actionError);
   if(snapshot.timestamp_ms-sampleTime>=450){points.push({t:snapshot.timestamp_ms,a:snapshot.quotes_valid ? snapshot.directions.SHORT_BINANCE.raw_spread : null,b:snapshot.quotes_valid ? snapshot.directions.LONG_BINANCE.raw_spread : null});if(points.length>120) points.shift();sampleTime=snapshot.timestamp_ms;}
   draw();set("last-update",`· 更新于 ${time(snapshot.timestamp_ms)}`);
 }
@@ -154,15 +150,13 @@ function draw(){
   canvas.width=Math.round(box.width*ratio);canvas.height=Math.round(box.height*ratio);
   const ctx=canvas.getContext("2d");ctx.scale(ratio,ratio);
   const width=box.width,height=box.height,left=37,right=12,top=15,bottom=25;
-  const threshold=Number(current?.config.entry_threshold||4.2);
   const values=points.flatMap(p=>[p.a,p.b]).filter(v=>v!==null).map(Number);
   $("chart-empty").hidden=values.length>0;
-  let low=Math.floor(Math.min(-5,...values)-.5),high=Math.ceil(Math.max(5,threshold,...values)+.5);
+  let low=Math.floor(Math.min(-5,...values)-.5),high=Math.ceil(Math.max(5,...values)+.5);
   const y=v=>top+(high-v)/(high-low)*(height-top-bottom);
   const x=i=>left+i/Math.max(points.length-1,1)*(width-left-right);
   ctx.font="10px Consolas, monospace";ctx.textAlign="right";
   for(let i=0;i<=4;i++){const value=low+(high-low)*i/4,py=y(value);ctx.strokeStyle="#edf1f3";ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(left,py);ctx.lineTo(width-right,py);ctx.stroke();ctx.fillStyle="#a4b1ba";ctx.fillText(value.toFixed(1),left-9,py+3);}
-  ctx.setLineDash([4,5]);ctx.strokeStyle="#c6a365";ctx.beginPath();ctx.moveTo(left,y(threshold));ctx.lineTo(width-right,y(threshold));ctx.stroke();ctx.setLineDash([]);
   for(const [key,color] of [["a","#238f7c"],["b","#7c96c0"]]){ctx.strokeStyle=color;ctx.lineWidth=1.8;ctx.beginPath();let active=false;points.forEach((p,i)=>{if(p[key]===null){active=false;return;}if(active)ctx.lineTo(x(i),y(Number(p[key])));else ctx.moveTo(x(i),y(Number(p[key])));active=true;});ctx.stroke();}
   if(points.length){ctx.fillStyle="#a4b1ba";ctx.textAlign="left";ctx.fillText(time(points[0].t),left,height-7);ctx.textAlign="right";ctx.fillText(time(points.at(-1).t),width-right,height-7);}
 }
