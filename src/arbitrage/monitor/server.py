@@ -88,6 +88,20 @@ def create_app(controller: MonitorController) -> web.Application:
             return web.json_response({"error": "mode must be a, b or both"}, status=400)
         return web.json_response(controller.snapshot()["entry_selection"])
 
+    async def placement(request):
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict) or set(payload) != {"mode", "request_id"}:
+                raise ValueError("Expected mode and request_id")
+            if not isinstance(payload["request_id"], str):
+                raise ValueError("request_id must be a UUID string")
+            controller.control_placement(payload["mode"], payload["request_id"])
+        except (ValueError, TypeError, AttributeError):
+            return web.json_response({"error": "Invalid placement mode or request_id"}, status=400)
+        except RuntimeError as exc:
+            return web.json_response({"error": str(exc)}, status=409)
+        return web.json_response(controller.snapshot()["placement"])
+
     async def cleanup(app):
         await controller.close()
 
@@ -96,6 +110,7 @@ def create_app(controller: MonitorController) -> web.Application:
     app.router.add_get("/api/status", status)
     app.router.add_get("/api/history", history)
     app.router.add_post("/api/direction", direction)
+    app.router.add_post("/api/placement", placement)
     app.router.add_post("/api/{action:start|stop}", control)
     app.on_cleanup.append(cleanup)
     return app

@@ -3,9 +3,10 @@ import json
 import logging
 from collections import deque
 from dataclasses import asdict
+from uuid import UUID
 
 from arbitrage.config import Settings
-from arbitrage.domain.enums import Direction, EntryMode
+from arbitrage.domain.enums import Direction, EntryMode, PlacementMode
 from arbitrage.market.runtime import run_market
 from arbitrage.observability import dumps, now_ms
 from arbitrage.risk.quote_guard import QuoteGuard
@@ -49,6 +50,7 @@ class MonitorController:
         self.stop_event = asyncio.Event()
         self.events: deque[dict] = deque(maxlen=200)
         self.handler = EventBuffer(self.events)
+        self.placement_requests: dict[str, PlacementMode] = {}
         logging.getLogger("arbitrage").addHandler(self.handler)
 
     def start(self) -> bool:
@@ -63,6 +65,7 @@ class MonitorController:
     def _on_engine(self, engine) -> None:
         self.engine = engine
         engine.request_direction_mode(self.settings.entry.direction_mode)
+        engine.request_placement(PlacementMode.PAUSED)
         if not self.stop_event.is_set():
             self.status = "RUNNING"
 
@@ -73,6 +76,20 @@ class MonitorController:
         )
         if self.engine:
             self.engine.request_direction_mode(selected)
+
+    def control_placement(self, mode: str, request_id: str) -> None:
+        selected = PlacementMode(mode)
+        key = str(UUID(request_id))
+        if key in self.placement_requests:
+            if self.placement_requests[key] != selected:
+                raise ValueError("Request ID already used for another command")
+            return
+        if self.status != "RUNNING" or self.engine is None:
+            raise RuntimeError("Start quote monitoring before creating an order task")
+        self.engine.request_placement(selected)
+        self.placement_requests[key] = selected
+        if len(self.placement_requests) > 200:
+            del self.placement_requests[next(iter(self.placement_requests))]
 
     async def _run(self) -> None:
         try:
@@ -145,6 +162,14 @@ class MonitorController:
                 ),
             },
             "status": self.status,
+            "placement": {
+                "mode": engine.placement_mode if engine else PlacementMode.PAUSED,
+                "requested": engine.requested_placement_mode if engine else PlacementMode.PAUSED,
+                "pending": bool(
+                    engine and engine.placement_mode != engine.requested_placement_mode
+                ),
+                "orders_created": engine.orders_created if engine else 0,
+            },
             "error": self.error,
             "state": engine.state if engine else "IDLE",
             "quotes_valid": valid,

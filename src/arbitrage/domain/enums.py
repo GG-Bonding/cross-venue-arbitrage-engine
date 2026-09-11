@@ -22,6 +22,12 @@ class EntryMode(StrEnum):
         )
 
 
+class PlacementMode(StrEnum):
+    PAUSED = "paused"
+    ONCE = "once"
+    LOOP = "loop"
+
+
 class OrderState(StrEnum):
     MAKER_PENDING = "MAKER_PENDING"
     CANCELING = "CANCELING"

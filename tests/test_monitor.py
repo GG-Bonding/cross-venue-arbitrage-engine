@@ -2,6 +2,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from copy import deepcopy
+from uuid import uuid4
 
 import aiohttp
 import pytest
@@ -217,3 +218,56 @@ async def test_history_reads_persisted_paper_orders(tmp_path):
                 history = await response.json()
                 assert history["orders"][0]["state"] == "CANCELED"
                 assert history["orders"][0]["filled_qty"] == "0"
+
+
+async def test_placement_api_validates_controls_and_deduplicates(tmp_path):
+    ready = asyncio.Event()
+
+    async def runner(config, *, stop, on_engine):
+        async with SQLiteRepository(config.database.path) as repo:
+            engine = ArbitrageStrategy(config, spec(), repo)
+            await engine.start(1000)
+            on_engine(engine)
+            await engine.on_timer(1000)
+            ready.set()
+            await stop.wait()
+            await engine.shutdown(2000)
+
+    settings = Settings.model_validate({"database": {"path": tmp_path / "paper.db"}})
+    async with monitor_server(settings, runner) as (base, controller):
+        async with aiohttp.ClientSession() as client:
+            view = await (await client.get(base + "/api/status")).json()
+            headers = {"Origin": base, "X-Control-Token": view["control_token"]}
+            payload = {"mode": "once", "request_id": str(uuid4())}
+            async with client.post(base + "/api/placement", json=payload) as response:
+                assert response.status == 403
+            async with client.post(
+                base + "/api/placement", headers=headers, json=payload
+            ) as response:
+                assert response.status == 409  # No quote session yet.
+            controller.start()
+            await asyncio.wait_for(ready.wait(), 1)
+            for invalid in ({}, {"mode": "once", "request_id": "bad"}, {**payload, "mode": []}):
+                async with client.post(
+                    base + "/api/placement", headers=headers, json=invalid
+                ) as response:
+                    assert response.status == 400
+            for _ in range(2):
+                async with client.post(
+                    base + "/api/placement", headers=headers, json=payload
+                ) as response:
+                    assert response.status == 200
+                    assert (await response.json())["requested"] == "once"
+            async with client.post(
+                base + "/api/placement",
+                headers=headers,
+                json={"mode": "loop", "request_id": str(uuid4())},
+            ) as response:
+                assert response.status == 409
+            async with client.post(
+                base + "/api/placement",
+                headers=headers,
+                json={"mode": "paused", "request_id": str(uuid4())},
+            ) as response:
+                assert response.status == 200
+            assert controller.status == "RUNNING"

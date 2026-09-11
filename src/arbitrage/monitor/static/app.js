@@ -7,6 +7,9 @@ let token = null, busy = false, online = false, current = null, lastHistory = 0,
 const points = [];
 const modeNames = {a:"仅 A · 空 Binance / 多 MT5",b:"仅 B · 多 Binance / 空 MT5",both:"双向自动"};
 eventNames.entry_direction_changed="挂单方向已切换";
+eventNames.placement_mode_changed="挂单任务已切换";
+eventNames.placement_once_completed="单次挂单任务已结束";
+const placementNames={paused:"仅监控",once:"单次挂单",loop:"循环挂单"};
 const decimal = value => value === null || value === undefined ? "—" : String(value);
 const fixed = value => value === null || value === undefined ? "—" : Number(value).toFixed(2);
 const ms = value => value === null || value === undefined ? "—" : `${value} ms`;
@@ -26,6 +29,12 @@ function controls(){
     button.disabled = !online || busy || state === "STOPPING";
     button.setAttribute("aria-pressed",String(button.dataset.mode === current?.entry_selection?.requested));
   }
+  const plan=current?.placement;
+  const ready=online && !busy && state === "RUNNING" && !["SAFE_MODE","ERROR"].includes(current?.state);
+  const idle=plan?.mode === "paused" && plan?.requested === "paused" && !current?.order;
+  $("placement-once").disabled=!ready || !idle;
+  $("placement-loop").disabled=!ready || !idle;
+  $("placement-pause").disabled=!online || busy || state !== "RUNNING" || idle;
 }
 async function action(name){
   busy = true;controls();
@@ -51,6 +60,26 @@ function renderSelection(snapshot){
   const selection=snapshot.entry_selection;
   set("direction-status",selection.pending ? `正在切换为 ${modeNames[selection.requested]}；当前生效：${modeNames[selection.active]}` : `${selection.active ? "当前生效" : "下次启动使用"}：${modeNames[selection.requested]}`);
 }
+for(const [id,mode] of [["placement-once","once"],["placement-loop","loop"],["placement-pause","paused"]]) $(id).addEventListener("click",async()=>{
+  busy=true;controls();
+  try{
+    current.placement=await request("/api/placement",{method:"POST",headers:{"X-Control-Token":token,"Content-Type":"application/json"},body:JSON.stringify({mode,request_id:crypto.randomUUID()})});
+    renderPlacement(current);error(null);
+  }catch(e){error(`挂单任务未确认：${e.message}，请查看当前任务状态后操作。`);}
+  finally{busy=false;controls();}
+});
+function renderPlacement(snapshot){
+  const plan=snapshot.placement;
+  let message;
+  if(snapshot.status !== "RUNNING") message="先启动行情监控，再创建挂单任务";
+  else if(plan.pending) message=`正在切换：${placementNames[plan.requested]}`;
+  else if(snapshot.order) message=`${placementNames[plan.mode]} · ${labels[snapshot.order.state] || snapshot.order.state}`;
+  else if(plan.mode === "paused") message="仅监控 · 点击按钮创建单次或循环挂单任务";
+  else if(!snapshot.quotes_valid) message=`${placementNames[plan.mode]}等待中 · ${reasons[snapshot.quote_reason] || "等待有效行情"}`;
+  else message=`${placementNames[plan.mode]}等待中 · 等待所选方向达到阈值并完成连续确认`;
+  if(snapshot.state === "SAFE_MODE") message="安全模式 · 请先核对未完成订单，禁止新挂单";
+  set("placement-status",`${message} · 本次监控已创建 ${plan.orders_created} 笔模拟挂单`);
+}
 function quoteView(venue, snapshot){
   const q = snapshot[venue], connected = snapshot.connections[venue];
   const age = q ? Math.max(snapshot.timestamp_ms-q.local_ts_ms,snapshot.timestamp_ms-q.exchange_ts_ms) : null;
@@ -74,6 +103,7 @@ function signal(prefix, direction, snapshot){
   $(`${prefix}-edge`).className=!snapshot.quotes_valid || d.edge===null ? "" : Number(d.edge)>=0?"positive":"negative";
   set(`${prefix}-state`,snapshot.quotes_valid ? labels[d.state] || d.state : `${reasons[snapshot.quote_reason] || "等待有效行情"} · ${d.raw_spread === null ? "暂无价差" : "价差仅供观察"}`);
   if(!enabled) set(`${prefix}-state`,"未启用挂单 · 仅观察价差");
+  else if(snapshot.quotes_valid && snapshot.placement.mode === "paused") set(`${prefix}-state`,"仅监控 · 未启动挂单");
   set(`${prefix}-count`,`${d.count} / ${c.min_ticks}`);
   set(`${prefix}-duration`,`${d.duration_ms} / ${c.min_duration_ms} ms`);
   $(`${prefix}-ticks-progress`).max=c.min_ticks;$(`${prefix}-ticks-progress`).value=d.count;
@@ -87,7 +117,7 @@ function renderEvents(events){
     const t=document.createElement("time");t.textContent=time(e.timestamp_ms);
     const content=document.createElement("div"),title=document.createElement("strong"),detail=document.createElement("p");
     title.textContent=eventNames[e.event] || e.event;title.title=e.event;
-    detail.textContent=e.error || [e.reason,e.direction,modeNames[e.mode],e.order?.price ? `价格 ${e.order.price}` : null,e.order_id?.slice(0,12)].filter(Boolean).join(" · ") || e.event;
+    detail.textContent=e.error || [e.reason,e.direction,modeNames[e.mode],placementNames[e.placement],e.order?.price ? `价格 ${e.order.price}` : null,e.order_id?.slice(0,12)].filter(Boolean).join(" · ") || e.event;
     content.append(title,detail);row.append(t,content);list.append(row);
   }
 }
@@ -106,6 +136,7 @@ function render(snapshot){
   set("binance-symbol",c.symbols.binance);set("mt5-symbol",c.symbols.mt5);
   quoteView("binance",snapshot);quoteView("mt5",snapshot);
   renderSelection(snapshot);
+  renderPlacement(snapshot);
   set("entry-threshold",fixed(c.entry_threshold));set("cancel-threshold",fixed(c.cancel_threshold));
   set("confirmation-rule",`${c.min_ticks} ticks + ${c.min_duration_ms} ms`);set("age-limit",ms(c.max_quote_age_ms));set("skew-limit",ms(c.max_quote_skew_ms));set("pending-limit",ms(c.max_pending_ms));set("target-qty",c.binance_qty);
   set("quote-validity",snapshot.quotes_valid ? "双边报价有效" : reasons[snapshot.quote_reason] || "等待有效行情");

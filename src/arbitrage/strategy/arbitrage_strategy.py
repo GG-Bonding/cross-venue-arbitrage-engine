@@ -1,7 +1,7 @@
 from dataclasses import asdict
 
 from arbitrage.config import Settings
-from arbitrage.domain.enums import Direction, EntryMode, OrderState, StrategyState
+from arbitrage.domain.enums import Direction, EntryMode, OrderState, PlacementMode, StrategyState
 from arbitrage.domain.order import MakerOrder
 from arbitrage.domain.quote import Quote
 from arbitrage.domain.specs import BinanceSpec
@@ -39,6 +39,28 @@ class ArbitrageStrategy:
         self.last_guard_reason: str | None = None
         self.direction_mode = settings.entry.direction_mode
         self.requested_direction_mode = self.direction_mode
+        # CLI keeps its automatic behavior; the web controller pauses before feeds start.
+        self.placement_mode = PlacementMode.LOOP
+        self.requested_placement_mode = self.placement_mode
+        self.once_remaining = 0
+        self.orders_created = 0
+
+    def request_placement(self, mode: PlacementMode) -> None:
+        mode = PlacementMode(mode)
+        if mode != PlacementMode.PAUSED and (
+            self.state in (StrategyState.SAFE_MODE, StrategyState.ERROR)
+            or self.order is not None
+            or self.placement_mode != PlacementMode.PAUSED
+            or self.requested_placement_mode != PlacementMode.PAUSED
+        ):
+            raise RuntimeError("Stop the existing order task before starting another")
+        self.requested_placement_mode = mode
+
+    def placement_enabled(self) -> bool:
+        return self.placement_mode == self.requested_placement_mode and (
+            self.placement_mode == PlacementMode.LOOP
+            or (self.placement_mode == PlacementMode.ONCE and self.once_remaining > 0)
+        )
 
     def request_direction_mode(self, mode: EntryMode) -> None:
         # The event consumer applies the request; HTTP handlers never mutate orders.
@@ -75,6 +97,19 @@ class ArbitrageStrategy:
 
     async def on_timer(self, now: int) -> None:
         # Timers enforce age/timeout but never count as market ticks.
+        if self.placement_mode != self.requested_placement_mode:
+            self.placement_mode = self.requested_placement_mode
+            self.once_remaining = int(self.placement_mode == PlacementMode.ONCE)
+            await self._reset_confirmations(now, "placement_changed")
+            self.last_key = None
+            await self._record("placement_mode_changed", now, placement=self.placement_mode)
+        if (
+            self.placement_mode == PlacementMode.PAUSED
+            and self.order
+            and self.order.state == OrderState.MAKER_PENDING
+        ):
+            await self._cancel(now, "placement_stopped")
+            return
         if self.direction_mode != self.requested_direction_mode:
             self.direction_mode = self.requested_direction_mode
             await self._reset_confirmations(now, "direction_changed")
@@ -100,6 +135,9 @@ class ArbitrageStrategy:
                 self.order = None
                 self.state = StrategyState.IDLE
                 await self._reset_confirmations(now, "order_finished")
+                if self.placement_mode == PlacementMode.ONCE and self.once_remaining == 0:
+                    self.placement_mode = self.requested_placement_mode = PlacementMode.PAUSED
+                    await self._record("placement_once_completed", now)
             return
         reason = self.guard.check(self.binance_quote, self.mt5_quote, now)
         if reason:
@@ -147,6 +185,7 @@ class ArbitrageStrategy:
             valid
             and is_new
             and self.order is None
+            and self.placement_enabled()
             and self.state in (StrategyState.IDLE, StrategyState.CONFIRMING)
         ):
             await self._confirm_and_place(signals, now)
@@ -197,12 +236,18 @@ class ArbitrageStrategy:
         if not candidates:
             return
         direction = max(candidates, key=lambda d: signals[d]["edge"])
+        # A control request can arrive while confirmation events are being persisted.
+        if not self.placement_enabled() or not self.requested_direction_mode.allows(direction):
+            return
         self.state = StrategyState.PLACING_MAKER
         order = self.maker.place(
             direction, self.binance_quote, self.settings.trading.binance_qty, now
         )
         await self.repo.save_order(order, "maker_order_created", now)
         self.order = order
+        self.orders_created += 1
+        if self.placement_mode == PlacementMode.ONCE:
+            self.once_remaining = 0
         config = self.settings.maker
         self.cancel_policy = CancelPolicy(
             config.cancel_threshold, config.cancel_confirm_ms, config.max_pending_ms
@@ -211,6 +256,8 @@ class ArbitrageStrategy:
         log_event("maker_order_created", timestamp_ms=now, order=order)
 
     async def shutdown(self, now: int) -> None:
+        self.placement_mode = self.requested_placement_mode = PlacementMode.PAUSED
+        self.once_remaining = 0
         if self.order and self.order.state == OrderState.MAKER_PENDING:
             await self._cancel(now, "shutdown")
         if self.order and self.order.state == OrderState.CANCELING:
