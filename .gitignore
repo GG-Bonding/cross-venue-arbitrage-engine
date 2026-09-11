@@ -12,6 +12,7 @@ data/
 .env.*
 !.env.example
 config/config.yaml
+config/live.yaml
 # Local MT5 terminal, broker data and saved account sessions.
 MetaTrader_init/
 *.db

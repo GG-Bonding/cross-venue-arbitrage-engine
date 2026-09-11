@@ -71,6 +71,14 @@ class DatabaseConfig(ConfigModel):
     quote_sample_ms: int = Field(default=1000, ge=1)
 
 
+class LiveConfig(ConfigModel):
+    enabled: bool = False
+    order_poll_ms: int = Field(default=250, ge=100)
+    mt5_deviation_points: int = Field(default=20, ge=0, le=1000)
+    mt5_magic: int = Field(default=260911, ge=1, le=2147483647)
+    max_binance_qty: PositiveDecimal = Decimal("1")
+
+
 class Settings(ConfigModel):
     mode: Literal["paper", "live"] = "paper"
     symbol: SymbolConfig = Field(default_factory=SymbolConfig)
@@ -80,6 +88,19 @@ class Settings(ConfigModel):
     mt5: MT5Config = Field(default_factory=MT5Config)
     trading: TradingConfig = Field(default_factory=TradingConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    live: LiveConfig = Field(default_factory=LiveConfig)
+
+    def require_runtime(self) -> None:
+        if self.mode != "live":
+            return
+        if os.environ.get("CONFIRM_LIVE_TRADING") != "I_UNDERSTAND":
+            raise ValueError("Live mode requires CONFIRM_LIVE_TRADING=I_UNDERSTAND")
+        if not self.live.enabled:
+            raise ValueError("Live mode requires live.enabled=true")
+        if not self.trading.binance_underlying_per_qty:
+            raise ValueError("Live mode requires verified binance_underlying_per_qty")
+        if not all(os.environ.get(k) for k in ("BINANCE_API_KEY", "BINANCE_API_SECRET")):
+            raise ValueError("Live mode requires BINANCE_API_KEY and BINANCE_API_SECRET")
 
     @model_validator(mode="after")
     def validate_hysteresis(self) -> Self:
@@ -91,7 +112,7 @@ class Settings(ConfigModel):
         if self.mode == "live":
             if os.environ.get("CONFIRM_LIVE_TRADING") != "I_UNDERSTAND":
                 raise ValueError("Live mode requires CONFIRM_LIVE_TRADING=I_UNDERSTAND")
-            raise ValueError("Phase 1 does not implement live trading; use TRADING_MODE=paper")
+            raise ValueError("This entry point is Paper-only; use TRADING_MODE=paper")
 
 
 def load_settings(path: Path) -> Settings:
@@ -109,5 +130,5 @@ def load_settings(path: Path) -> Settings:
     if "TRADING_MODE" in os.environ:
         data["mode"] = os.environ["TRADING_MODE"]
     settings = Settings.model_validate(data)
-    settings.require_paper()
+    settings.require_runtime()
     return settings

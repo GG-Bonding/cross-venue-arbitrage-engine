@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import json
 import logging
 import math
 import os
@@ -17,6 +18,32 @@ def read_status(path: Path) -> dict:
     # mode=ro prevents accidental database creation or schema mutation.
     with sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True) as db:
         db.row_factory = sqlite3.Row
+        has_identity = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='runtime_identity'"
+        ).fetchone()
+        mode = (
+            db.execute("SELECT value FROM runtime_identity WHERE key='mode'").fetchone()
+            if has_identity
+            else None
+        )
+        if mode and mode[0] == "live":
+            trades = [
+                json.loads(row[0])
+                for row in db.execute(
+                    "SELECT payload FROM live_trades "
+                    "WHERE state NOT IN ('CLOSED','CANCELED','FAILED')"
+                )
+            ]
+            return {
+                "database": str(path),
+                "mode": "live",
+                "unfinished_orders": trades,
+                "state": "SAFE_MODE"
+                if any(t["state"] != "OPEN" for t in trades)
+                else "OPEN"
+                if trades
+                else "IDLE",
+            }
         orders = [
             dict(row) for row in db.execute("SELECT * FROM maker_orders WHERE state != 'CANCELED'")
         ]
@@ -29,12 +56,14 @@ def read_status(path: Path) -> dict:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Phase 1: Binance / MT5 paper spread monitor")
+    parser = argparse.ArgumentParser(
+        description="Binance / MT5 manual conditional trading workbench"
+    )
     parser.add_argument("--config", type=Path, help="YAML config; omitted uses validated defaults")
     parser.add_argument("--database", type=Path, help="Override SQLite path")
     commands = parser.add_mutually_exclusive_group()
     commands.add_argument("--demo", action="store_true", help="Run finite offline synthetic quotes")
-    commands.add_argument("--web", action="store_true", help="Local paper dashboard at 127.0.0.1")
+    commands.add_argument("--web", action="store_true", help="Local trading dashboard at 127.0.0.1")
     parser.add_argument(
         "--port", type=int, default=8765, help="Local dashboard port (default 8765)"
     )
@@ -55,7 +84,7 @@ def main() -> None:
             settings = load_settings(args.config)
         else:
             settings = Settings(mode=os.environ.get("TRADING_MODE", "paper"))
-            settings.require_paper()
+            settings.require_runtime()
         if args.duration is not None and (args.duration <= 0 or not math.isfinite(args.duration)):
             raise ValueError("--duration must be finite and positive")
         path = args.database or (Path("data/demo.db") if args.demo else settings.database.path)

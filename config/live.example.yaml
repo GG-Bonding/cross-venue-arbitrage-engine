@@ -1,0 +1,22 @@
+# Copy to config/live.yaml. Disabled until every live prerequisite is configured.
+mode: live
+symbol:
+  binance: XAUUSDT
+  mt5: XAUUSD
+mt5:
+  terminal_path: null
+  tick_time_offset_minutes: 0
+market:
+  binance_proxy_url: null
+trading:
+  binance_qty: "1"
+  # Required: independently verify the underlying units per Binance quantity.
+  binance_underlying_per_qty: null
+live:
+  enabled: false
+  max_binance_qty: "1"
+  order_poll_ms: 250
+  mt5_deviation_points: 20
+  mt5_magic: 260911
+database:
+  path: ./data/live.db

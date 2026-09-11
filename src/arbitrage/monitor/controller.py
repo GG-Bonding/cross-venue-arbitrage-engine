@@ -40,7 +40,7 @@ def describe_error(exc: BaseException) -> str:
 
 class MonitorController:
     def __init__(self, settings: Settings, *, runner=None):
-        settings.require_paper()
+        settings.require_runtime()
         self.settings = settings
         self.runner = runner or run_market
         self.status = "STOPPED"
@@ -56,7 +56,7 @@ class MonitorController:
     def start(self) -> bool:
         if self.task is not None and not self.task.done():
             return False
-        self.settings.require_paper()
+        self.settings.require_runtime()
         self.status, self.error, self.engine = "STARTING", None, None
         self.stop_event = asyncio.Event()
         self.task = asyncio.create_task(self._run(), name="paper-monitor-session")
@@ -159,7 +159,11 @@ class MonitorController:
             directions[direction] = result
         view = {
             "timestamp_ms": now,
-            "mode": "paper",
+            "mode": config.mode,
+            "accounts": getattr(engine, "accounts", {}),
+            "accounts_updated_ms": getattr(engine, "accounts_updated_ms", None),
+            "accounts_error": getattr(engine, "accounts_error", None),
+            "trades": list(getattr(engine, "trades", {}).values()),
             "entry_selection": {
                 "requested": config.entry.direction_mode,
                 "active": engine.direction_mode if engine and active else None,
@@ -181,7 +185,7 @@ class MonitorController:
                 ),
                 "orders_created": engine.orders_created if engine else 0,
             },
-            "error": self.error,
+            "error": self.error or getattr(engine, "risk_error", None),
             "state": engine.state if engine else "IDLE",
             "quotes_valid": valid,
             "quote_reason": reason,
@@ -204,6 +208,7 @@ class MonitorController:
                 "max_pending_ms": config.maker.max_pending_ms,
                 "binance_qty": config.trading.binance_qty,
                 "mt5_tick_time_offset_minutes": config.mt5.tick_time_offset_minutes,
+                "live_max_qty": config.live.max_binance_qty,
             },
         }
         return json.loads(dumps(view))

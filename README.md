@@ -2,9 +2,10 @@
 
 Python 3.12+，单进程 asyncio，Decimal 价格/数量，SQLite WAL。
 
-当前交付 **Phase 1：只读实时行情 + Paper 挂撤单**，遵循需求“首先只开始 Phase 1”。
-Binance 和 MT5 的真实下单接口均未实现。`TRADING_MODE=live` 未确认时启动失败；
-即使设置 `CONFIRM_LIVE_TRADING=I_UNDERSTAND`，Phase 1 仍拒绝 live。
+默认提供真实行情 + Paper 挂撤单。新增交易工作台与显式启用的双边实盘执行：
+Binance Post-only 入场、实际成交量 MT5 对冲、逐笔/批量平仓、条件平仓及成交回报。
+实盘接口已有本地替身测试，尚未通过真实账户联调；当前本地监控仍为 Paper。
+配置、账户模式要求、失败恢复和未实现项见 [实盘说明](docs/LIVE_TRADING.md)。
 
 ## 本地网页与手动条件挂单
 
@@ -73,7 +74,7 @@ $env:TRADING_MODE = 'paper'
 不指定 `--duration` 时持续监控，Ctrl+C 关闭并撤销本地模拟挂单。
 MetaTrader5 二进制包需要与你的 Windows/Python 版本匹配；若安装失败，可用 Python 3.12 环境。
 通过 `mt5.terminal_path` 选择终端，通过 `symbol.mt5` 设置 Broker 实际符号。
-程序不读取 Binance API key，不发送签名请求，也不调用 MT5 下单函数。
+Paper 模式不读取 Binance API key，不发送签名请求，也不调用 MT5 下单函数。
 
 本地已有 `MetaTrader_init/terminal64.exe` 时，在 `config/config.yaml` 的
 `mt5.terminal_path` 填写该文件的绝对路径，程序复用终端保存的登录会话。
@@ -98,7 +99,7 @@ quantityPrecision/pricePrecision；从 MT5 `symbol_info()` 读取 contract size 
 
 Binance 数量与 MT5 lot 不等价。`HedgeCalculator` 按显式 underlying multiplier 和实际
 MT5 contract size 转换；不能精确表示的手数报错。`exchangeInfo` 不保证提供盎司换算单位，
-因此 `binance_underlying_per_qty` 默认留空，不能仅凭 XAU 名称推断。Phase 1 不执行对冲。
+因此 `binance_underlying_per_qty` 默认留空，不能仅凭 XAU 名称推断。实盘必须配置已核实乘数。
 
 ## 策略行为
 
@@ -147,8 +148,8 @@ SQLite 开启 WAL 和 synchronous=FULL。挂单状态及对应事件使用同一
 可保留原库作审计并用 `--database data/new-paper-session.db` 开始新的独立模拟会话。
 没有自动清空订单或猜测状态的恢复开关。
 
-**此恢复仅适用于 Phase 1 本地模拟订单**。Binance 账户订单/持仓、MT5 持仓、DB Pair 的
-跨账户 reconciliation 尚未实现，不可拿本版本的 SAFE_MODE 作为实盘仓位保护。
+**以上换库恢复仅适用于本地模拟订单**。实盘启动核对双边持仓、方向与本地账本；
+不确定执行不会自动重发，处理方式见 [实盘恢复说明](docs/LIVE_TRADING.md)。
 
 ## 目录和开发阶段
 
@@ -169,10 +170,9 @@ tests/                   核心计算、执行、线程/传输、CLI 测试
 docs/                    API 核对与开发验证记录
 ```
 
-Phase 2 才增加 Binance 真实 Maker、User Data Stream、Partial Fill/重复事件幂等、
-Cancel/Fill 竞态和真实账户 reconciliation；Phase 3 增加真实 MT5 Hedge、有限重试和
-Emergency Risk Handler；Phase 4 增加 Maker 平仓、真实费用/funding/swap、USD/USDT 换算和净收益；
-Phase 5 在稳定验证后增加多档位。本次没有提前实现这些实盘能力。
+实盘实现位于 execution/live_venues.py 与 strategy/live_orders.py，使用独立配置及数据库。
+后续仍需真实账户联调、用户数据流、资金费归属、币种换算和不确定执行的恢复工具。
+当前平仓使用市场单，不是 Maker 平仓；不得把接口测试作为收益或实盘稳定性证明。
 
 官方接口核对链接见 [docs/API_NOTES.md](docs/API_NOTES.md)，测试先行记录见
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。GitHub Actions 在 Linux Python 3.12 和 Windows

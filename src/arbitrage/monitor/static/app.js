@@ -6,7 +6,7 @@ const eventNames = {mt5_connected:"MT5 已连接",binance_connected:"Binance 已
 let token = null, busy = false, online = false, current = null, lastHistory = 0, sampleTime = 0;
 const points = [];
 let formInitialized=false, actionError=null, pendingDraft=null;
-const conditionLabels={WAITING:"等待条件",EXECUTING:"模拟挂单中",CANCELING:"正在撤单",DONE:"本次结束 · 模拟单已撤",CANCELED:"已取消",PAUSED:"已暂停",REVIEW:"中断待核对",FAILED:"执行失败"};
+const conditionLabels={WAITING:"等待条件",EXECUTING:"模拟挂单中",CANCELING:"正在撤单",DONE:"本次结束 · 模拟单已撤",CANCELED:"已取消",PAUSED:"已暂停",REVIEW:"中断待核对",FAILED:"执行失败",OPEN:"已开仓",CLOSING:"双边平仓中"};
 Object.assign(eventNames,{conditional_created:"已创建手动条件单",conditional_reserved:"条件满足 · 占用执行槽",conditional_executing:"条件单正在执行",conditional_cycle_finished:"条件单本轮结束",conditional_cancel_requested:"条件单取消请求",conditional_resumed:"条件单已恢复",conditional_paused:"条件单已暂停"});
 eventNames.entry_direction_changed="挂单方向已切换";
 const decimal = value => value === null || value === undefined ? "—" : String(value);
@@ -15,7 +15,7 @@ const ms = value => value === null || value === undefined ? "—" : `${value} ms
 const time = value => value ? new Date(value).toLocaleTimeString("zh-CN",{hour12:false}) : "—";
 function set(id, value){$(id).textContent = value;}
 function showError(message){$("error").hidden = !message;set("error",message || "");}
-function error(message){actionError=message;showError(message);}
+function error(message){actionError=message;showError(message);if($("dialog-error")){set("dialog-error",message || "");$("dialog-error").hidden=!message;}}
 async function request(path, options = {}){
   const response = await fetch(path,{...options,cache:"no-store",signal:AbortSignal.timeout(options.method === "POST" ? 15000 : 4000)});
   const data=await response.json();
@@ -29,6 +29,7 @@ function controls(){
   const running=online && !busy && state === "RUNNING";
   $("condition-create").disabled=!running || ["SAFE_MODE","ERROR"].includes(current?.state);
   for(const button of document.querySelectorAll("[data-condition-action]")) button.disabled=!running;
+  if($("close-all"))$("close-all").disabled=!running || current?.state === "SAFE_MODE" || !(current?.conditions || []).some(c=>c.state === "OPEN");
 }
 async function action(name){
   busy = true;controls();
@@ -45,13 +46,13 @@ $("stop").addEventListener("click",()=>action("stop"));
 $("condition-form").addEventListener("submit",async event=>{
   event.preventDefault();
   if($("condition-create").disabled) return;
-  const fields={direction:$("condition-direction").value,entry_threshold:$("condition-entry").value,cancel_threshold:$("condition-cancel").value,quantity:$("condition-quantity").value,repeat:$("condition-repeat").checked};
+  const fields={direction:$("condition-direction").value,entry_threshold:$("condition-entry").value,cancel_threshold:$("condition-cancel").value,quantity:$("condition-quantity").value,repeat:$("condition-repeat").checked,exit_threshold:$("condition-exit").disabled?null:$("condition-exit").value || null};
   const signature=JSON.stringify(fields);
   if(!pendingDraft || pendingDraft.signature !== signature) pendingDraft={signature,id:crypto.randomUUID()};
   busy=true;controls();
   try{
     await request("/api/conditions",{method:"POST",headers:{"X-Control-Token":token,"Content-Type":"application/json"},body:JSON.stringify({...fields,request_id:pendingDraft.id})});
-    pendingDraft=null;error(null);
+    pendingDraft=null;error(null);$("condition-dialog").close();
     current=await request("/api/status");render(current);
   }catch(e){error(`条件单未确认：${e.message}`);}
   finally{busy=false;controls();}
@@ -73,21 +74,30 @@ function renderConditions(snapshot){
   }
   const body=$("conditions-body");body.replaceChildren();
   const conditions=snapshot.conditions || [];
+  set("waiting-count",conditions.filter(c=>c.state === "WAITING").length);
+  set("active-count",conditions.filter(c=>["EXECUTING","CANCELING","CLOSING"].includes(c.state)).length);
+  set("paused-count",conditions.filter(c=>c.state === "PAUSED").length);
   const order=snapshot.order;
   set("execution-slot",order ? `执行槽已占用 · 条件单 ${order.conditional_id?.slice(0,8) || "历史订单"} · ${labels[order.state]} · 其余条件单等待` : "执行槽空闲 · 只执行手动创建且满足条件的单子");
+  if(snapshot.active_condition_id)set("execution-slot",`执行槽已占用 · ${snapshot.active_condition_id.slice(0,8)} · 其他条件单等待`);
   if(!conditions.length){const row=body.insertRow(),cell=row.insertCell();cell.colSpan=9;cell.className="empty-row";cell.textContent="尚无手动条件单，系统不会自动创建订单。";return;}
-  for(const c of conditions){
+  for(const c of conditions.filter(c=>window.conditionVisible ? window.conditionVisible(c) : true)){
     let status=conditionLabels[c.state] || c.state;
+    if(c.close_requested)status+=" · 平仓已排队";
     if(c.state === "WAITING"){
       status += order ? " · 等待执行槽" : !snapshot.quotes_valid ? ` · ${reasons[snapshot.quote_reason] || "等待有效行情"}` : ` · ${c.confirmation.count}/${snapshot.config.min_ticks} Tick · ${c.confirmation.duration_ms}/${snapshot.config.min_duration_ms} ms`;
     }
     const row=body.insertRow();row.dataset.conditionId=c.request_id;
-    for(const value of [`${c.request_id.slice(0,8)} / ${c.queue_seq}`,c.direction === "SHORT_BINANCE" ? "A" : "B",c.entry_threshold,c.cancel_threshold,c.quantity,c.repeat?"是":"否",c.execution_count,status]){const cell=row.insertCell();cell.textContent=String(value);}
+    for(const value of [`GOLD · ${c.request_id.slice(0,8)} / #${c.queue_seq}`,c.direction === "SHORT_BINANCE" ? "A · 空 Binance" : "B · 多 Binance",`${c.entry_threshold} / ${fixed(c.raw_spread)}`,c.cancel_threshold,c.quantity,c.repeat?"循环":"单次",c.execution_count,status]){const cell=row.insertCell();cell.textContent=String(value);}
+    row.cells[1].className=c.direction === "SHORT_BINANCE"?"direction-a":"direction-b";
+    row.cells[7].className=`condition-state state-${c.state.toLowerCase()}`;
     const actions=row.insertCell();
-    for(const action of c.state === "PAUSED" ? ["resume","cancel"] : ["WAITING","EXECUTING","CANCELING","REVIEW"].includes(c.state) ? ["cancel"] : []){
-      const button=document.createElement("button");button.textContent=action === "resume" ? "恢复此单" : "取消此单";button.dataset.conditionAction=action;button.addEventListener("click",()=>conditionAction(c.request_id,action));actions.append(button);
+    for(const action of c.state === "PAUSED" ? ["resume","cancel"] : c.state === "WAITING" ? ["pause","cancel"] : c.state === "OPEN" ? ["close"] : ["EXECUTING","CANCELING"].includes(c.state) ? ["cancel"] : []){
+      const button=document.createElement("button");button.textContent=({resume:"恢复",cancel:"取消",pause:"暂停",close:"平仓"})[action];button.dataset.conditionAction=action;button.addEventListener("click",()=>conditionAction(c.request_id,action));actions.append(button);
     }
+    for(const [label,handler] of [["复制",()=>window.openCondition(c)],["详情",()=>window.showCondition(c)]]){const button=document.createElement("button");button.textContent=label;button.addEventListener("click",handler);actions.append(button);}
   }
+  if(!body.rows.length){const cell=body.insertRow().insertCell();cell.colSpan=9;cell.className="empty-row";cell.textContent="此筛选下暂无条件单";}
 }
 function quoteView(venue, snapshot){
   const q = snapshot[venue], connected = snapshot.connections[venue];
@@ -128,6 +138,7 @@ async function history(){
   }catch(e){$("history-error").hidden=false;set("history-error",`历史订单暂不可用：${e.message}`);}
 }
 function render(snapshot){
+  if(window.renderTrading)window.renderTrading(snapshot);
   const c=snapshot.config;set("clock",new Date(snapshot.timestamp_ms).toLocaleString("zh-CN",{hour12:false}));
   set("session-state",labels[snapshot.status]||snapshot.status);set("strategy-state",labels[snapshot.state]||snapshot.state);
   $("session-dot").className=`status-dot ${snapshot.status === "RUNNING"?"running":snapshot.status === "ERROR"?"error":""}`;
@@ -139,6 +150,7 @@ function render(snapshot){
   $("quote-validity").className=`validity ${snapshot.quotes_valid?"good":""}`;
   set("quote-skew",snapshot.binance && snapshot.mt5 ? ms(Math.abs(snapshot.binance.exchange_ts_ms-snapshot.mt5.exchange_ts_ms)):"—");
   signal("a","SHORT_BINANCE",snapshot);signal("b","LONG_BINANCE",snapshot);
+  set("pair-a",fixed(snapshot.directions.SHORT_BINANCE.raw_spread));set("pair-b",fixed(snapshot.directions.LONG_BINANCE.raw_spread));
   const o=snapshot.order;
   set("current-order",o?`当前 ${o.direction === "SHORT_BINANCE"?"SELL":"BUY"} · ${o.price} × ${o.quantity} · ${labels[o.state]||o.state}`:"当前没有挂单");
   renderEvents(snapshot.events);showError(snapshot.error || actionError);

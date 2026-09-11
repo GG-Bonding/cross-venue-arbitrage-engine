@@ -54,7 +54,12 @@ def create_app(controller: MonitorController) -> web.Application:
 
     async def asset(request):
         name = request.match_info.get("name", "index.html")
-        types = {"index.html": "text/html", "style.css": "text/css", "app.js": "text/javascript"}
+        types = {
+            "index.html": "text/html",
+            "style.css": "text/css",
+            "app.js": "text/javascript",
+            "workbench.js": "text/javascript",
+        }
         if name not in types:
             raise web.HTTPNotFound()
         content = files("arbitrage.monitor").joinpath("static", name).read_text(encoding="utf-8")
@@ -102,6 +107,13 @@ def create_app(controller: MonitorController) -> web.Application:
     async def cleanup(app):
         await controller.close()
 
+    async def close_all(request):
+        try:
+            result = await controller.condition_command("close_all", None)
+            return web.json_response(result)
+        except (ValueError, TimeoutError) as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+
     app.router.add_get("/", asset)
     app.router.add_get("/assets/{name}", asset)
     app.router.add_get("/api/status", status)
@@ -109,7 +121,10 @@ def create_app(controller: MonitorController) -> web.Application:
     app.router.add_post("/api/direction", legacy_control)
     app.router.add_post("/api/placement", legacy_control)
     app.router.add_post("/api/conditions", condition_control)
-    app.router.add_post("/api/conditions/{id}/{action:cancel|resume}", condition_control)
+    app.router.add_post("/api/close-all", close_all)
+    app.router.add_post(
+        "/api/conditions/{id}/{action:cancel|resume|pause|close}", condition_control
+    )
     app.router.add_post("/api/{action:start|stop}", control)
     app.on_cleanup.append(cleanup)
     return app
@@ -122,7 +137,7 @@ async def run_dashboard(settings: Settings, *, port: int = 8765) -> None:
         await runner.setup()
         site = web.TCPSite(runner, "127.0.0.1", port)
         await site.start()
-        log_event("dashboard_ready", url=f"http://127.0.0.1:{port}", mode="paper")
+        log_event("dashboard_ready", url=f"http://127.0.0.1:{port}", mode=settings.mode)
         await asyncio.Event().wait()
     finally:
         await runner.cleanup()

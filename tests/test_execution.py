@@ -61,14 +61,14 @@ def test_cancel_request_is_not_ack():
 
 
 @pytest.mark.parametrize("confirmation", [None, "I_UNDERSTAND"])
-def test_live_never_starts_in_phase1(tmp_path, monkeypatch, confirmation):
+def test_live_requires_confirmation_and_explicit_configuration(tmp_path, monkeypatch, confirmation):
     path = tmp_path / "config.yaml"
     path.write_text("mode: paper\n", encoding="utf-8")
     monkeypatch.setenv("TRADING_MODE", "live")
     monkeypatch.delenv("CONFIRM_LIVE_TRADING", raising=False)
     if confirmation:
         monkeypatch.setenv("CONFIRM_LIVE_TRADING", confirmation)
-    with pytest.raises(ValueError, match="CONFIRM_LIVE_TRADING|Phase 1"):
+    with pytest.raises(ValueError, match="CONFIRM_LIVE_TRADING|live.enabled"):
         load_settings(path)
 
 

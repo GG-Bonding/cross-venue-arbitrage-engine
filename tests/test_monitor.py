@@ -119,9 +119,9 @@ async def test_runner_failure_is_visible_and_blocks_stale_live_indication():
         await controller.close()
 
 
-def test_web_monitor_cannot_construct_in_live_mode(monkeypatch):
+def test_web_monitor_live_requires_explicit_enable(monkeypatch):
     monkeypatch.setenv("CONFIRM_LIVE_TRADING", "I_UNDERSTAND")
-    with pytest.raises(ValueError, match="Phase 1"):
+    with pytest.raises(ValueError, match="live.enabled"):
         MonitorController(Settings(mode="live"))
 
 

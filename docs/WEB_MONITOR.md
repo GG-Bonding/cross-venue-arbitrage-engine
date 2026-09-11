@@ -2,7 +2,10 @@
 
 ## 当前行为
 
-实时行情入口使用 ManualOrderStrategy。启动监控不会自动产生订单，只有用户手动创建的条件单可以进入执行。
+Paper 实时行情入口使用 ManualOrderStrategy；显式启用的实盘使用 LiveOrderStrategy。
+启动监控不会自动产生订单，只有用户手动创建的条件单可以进入执行。
+本页详述 Paper 语义，实盘开平仓与账户功能见 [LIVE_TRADING.md](LIVE_TRADING.md)。
+交易工作台支持添加挂单弹窗、复制预填、状态与方向筛选、详情和暂停。
 旧版全局方向及挂单接口返回 HTTP 410，旧页面也不能继续通过这些接口启动全局循环。
 离线 --demo 保留合成行情演示，它不是实时行情入口。
 
@@ -51,6 +54,9 @@ SQLite conditional_orders 表保存请求参数、队列顺序、状态、执行
 | POST /api/conditions | 创建手动条件单 |
 | POST /api/conditions/{UUID}/cancel | 取消指定条件单 |
 | POST /api/conditions/{UUID}/resume | 恢复指定 PAUSED 条件单 |
+| POST /api/conditions/{UUID}/pause | 暂停指定 WAITING 条件单 |
+| POST /api/conditions/{UUID}/close | 实盘持仓排队平仓 |
+| POST /api/close-all | 实盘所有已记录 OPEN 持仓排队平仓 |
 | POST /api/direction、/api/placement | 已停用，返回 410 |
 
 创建请求示例：

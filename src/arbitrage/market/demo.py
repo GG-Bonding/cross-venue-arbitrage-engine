@@ -19,6 +19,7 @@ async def run_demo(settings: Settings) -> None:
     log_event("demo_started", source="synthetic_fixture", fill_simulation=False)
     start = now_ms()
     async with SQLiteRepository(settings.database.path) as repo:
+        await repo.bind_mode("paper")
         engine = ArbitrageStrategy(settings, spec, repo)
         await engine.start(start)
         try:

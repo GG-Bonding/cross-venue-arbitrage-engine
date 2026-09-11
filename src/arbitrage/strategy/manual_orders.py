@@ -130,6 +130,12 @@ class ManualOrderStrategy(ArbitrageStrategy):
             condition.queue_seq = self._sequence()
             self._confirmation(payload).reset()
             await self.repo.save_condition(condition, "conditional_resumed", now)
+        elif action == "pause":
+            if condition.state != "WAITING":
+                raise ValueError("只能暂停尚未触发的条件单")
+            condition.state = "PAUSED"
+            self._confirmation(payload).reset()
+            await self.repo.save_condition(condition, "conditional_paused", now)
         else:
             raise ValueError("未知条件单操作")
         return asdict(condition)

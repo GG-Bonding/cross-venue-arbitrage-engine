@@ -43,7 +43,7 @@ mt5:
 trading:
   binance_qty: "1"
   # Optional, only after verifying the actual contract unit. Never infer it from the symbol.
-  # Phase 1 does not hedge; this value is informational until a verified hedge is implemented.
+  # Paper does not hedge. Live requires an explicitly verified multiplier.
   binance_underlying_per_qty: null
 
 database:
