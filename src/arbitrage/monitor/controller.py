@@ -131,7 +131,13 @@ class MonitorController:
         finally:
             logging.getLogger("arbitrage").removeHandler(self.handler)
 
-    def snapshot(self, *, now: int | None = None) -> dict:
+    def snapshot(
+        self,
+        *,
+        now: int | None = None,
+        compact: bool = False,
+        include_config: bool = True,
+    ) -> dict:
         now = now_ms() if now is None else now
         engine = self.engine
         b = engine.binance_quote if engine else None
@@ -160,31 +166,11 @@ class MonitorController:
         view = {
             "timestamp_ms": now,
             "mode": config.mode,
-            "accounts": getattr(engine, "accounts", {}),
-            "accounts_updated_ms": getattr(engine, "accounts_updated_ms", None),
-            "accounts_error": getattr(engine, "accounts_error", None),
-            "trades": list(getattr(engine, "trades", {}).values()),
-            "entry_selection": {
-                "requested": config.entry.direction_mode,
-                "active": engine.direction_mode if engine and active else None,
-                "pending": bool(
-                    engine and active and engine.direction_mode != config.entry.direction_mode
-                ),
-            },
             "status": self.status,
-            "manual_only": True,
             "conditions": engine.condition_views(now)
             if engine and hasattr(engine, "condition_views")
             else [],
             "active_condition_id": getattr(engine, "active_condition_id", None),
-            "placement": {
-                "mode": engine.placement_mode if engine else PlacementMode.PAUSED,
-                "requested": engine.requested_placement_mode if engine else PlacementMode.PAUSED,
-                "pending": bool(
-                    engine and engine.placement_mode != engine.requested_placement_mode
-                ),
-                "orders_created": engine.orders_created if engine else 0,
-            },
             "error": self.error or getattr(engine, "risk_error", None),
             "state": engine.state if engine else "IDLE",
             "quotes_valid": valid,
@@ -192,11 +178,44 @@ class MonitorController:
             "binance": b,
             "mt5": m,
             "directions": directions,
-            "order": engine.order if engine else None,
-            "metrics": engine.metrics.snapshot() if engine else {"counters": {}, "gauges": {}},
             "connections": {"binance": active and b is not None, "mt5": active and m is not None},
-            "events": list(self.events)[-50:],
-            "config": {
+        }
+        if not compact:
+            view.update(
+                {
+                    "accounts": getattr(engine, "accounts", {}),
+                    "accounts_updated_ms": getattr(engine, "accounts_updated_ms", None),
+                    "accounts_error": getattr(engine, "accounts_error", None),
+                    "trades": list(getattr(engine, "trades", {}).values()),
+                    "entry_selection": {
+                        "requested": config.entry.direction_mode,
+                        "active": engine.direction_mode if engine and active else None,
+                        "pending": bool(
+                            engine
+                            and active
+                            and engine.direction_mode != config.entry.direction_mode
+                        ),
+                    },
+                    "manual_only": True,
+                    "placement": {
+                        "mode": engine.placement_mode if engine else PlacementMode.PAUSED,
+                        "requested": (
+                            engine.requested_placement_mode if engine else PlacementMode.PAUSED
+                        ),
+                        "pending": bool(
+                            engine and engine.placement_mode != engine.requested_placement_mode
+                        ),
+                        "orders_created": engine.orders_created if engine else 0,
+                    },
+                    "order": engine.order if engine else None,
+                    "metrics": (
+                        engine.metrics.snapshot() if engine else {"counters": {}, "gauges": {}}
+                    ),
+                    "events": list(self.events)[-50:],
+                }
+            )
+        if include_config:
+            view["config"] = {
                 "symbols": {"binance": config.symbol.binance, "mt5": config.symbol.mt5},
                 "entry_threshold": config.entry.threshold,
                 "direction_mode": config.entry.direction_mode,
@@ -209,6 +228,5 @@ class MonitorController:
                 "binance_qty": config.trading.binance_qty,
                 "mt5_tick_time_offset_minutes": config.mt5.tick_time_offset_minutes,
                 "live_max_qty": config.live.max_binance_qty,
-            },
-        }
+            }
         return json.loads(dumps(view))

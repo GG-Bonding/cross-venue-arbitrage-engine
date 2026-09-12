@@ -171,6 +171,15 @@ async def test_dashboard_api_origin_controls_and_read_only_history(tmp_path):
                 assert view["mode"] == "paper"
                 assert "terminal_path" not in str(view)
                 assert response.headers["Cache-Control"] == "no-store"
+            async with client.get(base + "/api/status?compact=1") as response:
+                compact = await response.json()
+                assert "events" not in compact
+                assert "trades" not in compact
+                assert "metrics" not in compact
+                assert "accounts" not in compact
+                assert "config" not in compact
+            async with client.get(base + "/api/status?compact=1&config=1") as response:
+                assert "config" in await response.json()
             async with client.get(base + "/api/history") as response:
                 assert (await response.json())["orders"] == []
             assert not settings.database.path.exists()

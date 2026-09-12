@@ -59,6 +59,8 @@ def create_app(controller: MonitorController) -> web.Application:
             "style.css": "text/css",
             "app.js": "text/javascript",
             "workbench.js": "text/javascript",
+            "console.js": "text/javascript",
+            "console.css": "text/css",
         }
         if name not in types:
             raise web.HTTPNotFound()
@@ -66,7 +68,16 @@ def create_app(controller: MonitorController) -> web.Application:
         return web.Response(text=content, content_type=types[name])
 
     async def status(request):
-        return web.json_response({**controller.snapshot(), "control_token": token})
+        compact = request.query.get("compact") == "1"
+        return web.json_response(
+            {
+                **controller.snapshot(
+                    compact=compact,
+                    include_config=not compact or request.query.get("config") == "1",
+                ),
+                "control_token": token,
+            }
+        )
 
     async def control(request):
         if request.match_info["action"] == "start":

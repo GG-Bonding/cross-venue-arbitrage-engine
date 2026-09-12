@@ -36,6 +36,7 @@ class ArbitrageStrategy:
         self.mt5_quote: Quote | None = None
         self.last_key: tuple | None = None
         self.last_sample_ms: int | None = None
+        self.last_snapshot_log_key: tuple | None = None
         self.last_guard_reason: str | None = None
         self.direction_mode = settings.entry.direction_mode
         self.requested_direction_mode = self.direction_mode
@@ -219,13 +220,22 @@ class ArbitrageStrategy:
             },
             "order": self.order,
         }
-        if (
+        sample_due = (
             self.last_sample_ms is None
             or now - self.last_sample_ms >= self.settings.database.quote_sample_ms
-        ):
+        )
+        if sample_due:
             await self.repo.event("quotes_sample", "quote_snapshot", now, snapshot)
             self.last_sample_ms = now
-        log_event("market_snapshot", **snapshot)
+        order = self.order
+        log_key = (
+            self.state,
+            order.order_id if order else None,
+            order.state if order else None,
+        )
+        if sample_due or log_key != self.last_snapshot_log_key:
+            log_event("market_snapshot", **snapshot)
+            self.last_snapshot_log_key = log_key
         return snapshot
 
     async def _confirm_and_place(self, signals: dict, now: int) -> None:

@@ -105,6 +105,27 @@ async def test_only_selected_direction_can_place(tmp_path, mode, bid, ask, expec
         await engine.shutdown(1250)
 
 
+async def test_market_snapshot_logs_are_sampled_while_state_is_stable(tmp_path, monkeypatch):
+    recorded = []
+    monkeypatch.setattr(
+        "arbitrage.strategy.arbitrage_strategy.log_event",
+        lambda event, **payload: recorded.append((event, payload)),
+    )
+    config = Settings.model_validate(
+        {"entry": {"threshold": "100"}, "database": {"quote_sample_ms": 1000}}
+    )
+    async with SQLiteRepository(tmp_path / "test.db") as repo:
+        engine = ArbitrageStrategy(config, spec(), repo)
+        await engine.start(1000)
+        for ts in (1000, 1100, 1500, 2000):
+            await engine.on_quotes(quote("4416.90", "4416.98", ts), quote(ts=ts), ts)
+
+    snapshots = [
+        payload["timestamp_ms"] for event, payload in recorded if event == "market_snapshot"
+    ]
+    assert snapshots == [1000, 2000]
+
+
 async def test_switch_cancels_old_direction_before_new_order(tmp_path):
     async with SQLiteRepository(tmp_path / "test.db") as repo:
         engine = ArbitrageStrategy(Settings(), spec(), repo)

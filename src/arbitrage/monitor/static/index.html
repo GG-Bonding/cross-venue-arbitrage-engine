@@ -1,60 +1,86 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Aurum · 跨市场监控</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>跨市场交易控制台</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/assets/style.css">
-  <script src="/assets/app.js" defer></script>
-  <script src="/assets/workbench.js" defer></script>
+  <link rel="stylesheet" href="/assets/console.css">
+  <script src="/assets/console.js" defer></script>
 </head>
 <body>
-<aside class="sidebar">
-  <a class="brand" href="#overview"><span class="brand-icon">Au</span><span>AURUM<small>CROSS-VENUE MONITOR</small></span></a>
-  <div class="nav-label">交易对列表 <span>共 1 个</span></div>
-  <article class="pair-card"><strong>GOLD <small>XAUUSD / XAUUSDT</small></strong><div class="pair-spreads"><div><label>A 入场价差</label><b id="pair-a">—</b></div><div><label>B 入场价差</label><b id="pair-b">—</b></div></div><div class="pair-actions"><button data-new-direction="SHORT_BINANCE">空 Binance / 多 MT5</button><button data-new-direction="LONG_BINANCE">多 Binance / 空 MT5</button></div><p>沿用当前 A/B 定义，以平台名称为准</p></article>
-  <nav><a class="selected" href="#manual-orders">交易面板</a><a href="#orders">执行历史</a><a href="#spread-analysis">价差走势</a><a href="#events">运行事件</a></nav>
-  <div class="sidebar-bottom"><span class="local-dot"></span> 本地监控<small>仅在这台电脑上访问</small><div class="sidebar-version">PHASE 01 <span>PYTHON ENGINE</span></div></div>
-</aside>
-<main id="overview">
-  <header><div><div class="eyebrow">GOLD · CROSS-VENUE ARBITRAGE</div><h1>黄金跨市场监控 <span class="badge">PAPER</span></h1><p class="subtitle">Binance Futures <span>↔</span> MetaTrader 5 <i>·</i> 真实行情，本地模拟</p></div><div class="header-right"><span id="web-state" class="web-state">正在连接面板…</span><time id="clock">—</time></div></header>
-  <section class="session-bar"><div class="session-info"><span id="session-dot" class="status-dot"></span><strong id="session-state">等待连接</strong><span id="strategy-state">引擎未启动</span></div><div class="actions"><button id="stop" class="button-secondary" disabled>停止监控</button><button id="start" class="button-primary" disabled><span>▶</span> 启动 Paper 监控</button></div></section>
-  <div id="error" class="error" role="alert" hidden></div>
-  <section class="quotes-grid">
-    <article class="panel quote-card" id="binance-card"><div class="panel-heading"><div class="venue-mark binance-mark">B</div><div><h2>Binance Futures</h2><span class="symbol" id="binance-symbol">XAUUSDT</span></div><span class="connection" id="binance-connection">未连接</span></div><div class="prices"><div><label>买一价 <span>BID</span></label><strong id="binance-bid">—</strong><small id="binance-bid-qty">数量 —</small></div><div><label>卖一价 <span>ASK</span></label><strong id="binance-ask">—</strong><small id="binance-ask-qty">数量 —</small></div></div><div class="quote-footer"><span>接收延迟 <b id="binance-latency">—</b></span><span>报价年龄 <b id="binance-age">—</b></span></div></article>
-    <article class="panel quote-card" id="mt5-card"><div class="panel-heading"><div class="venue-mark mt5-mark">M</div><div><h2>MetaTrader 5</h2><span class="symbol" id="mt5-symbol">XAUUSD</span></div><span class="connection" id="mt5-connection">未连接</span></div><div class="prices"><div><label>买一价 <span>BID</span></label><strong id="mt5-bid">—</strong><small>Broker 可交易买价</small></div><div><label>卖一价 <span>ASK</span></label><strong id="mt5-ask">—</strong><small>Broker 可交易卖价</small></div></div><div class="quote-footer"><span>接收延迟 <b id="mt5-latency">—</b></span><span>报价年龄 <b id="mt5-age">—</b></span></div></article>
+  <header>
+    <h1 id="pair">等待配置</h1>
+    <span id="mode">—</span>
+    <span id="session">未连接</span>
+    <button id="start" disabled>启动会话</button>
+    <button id="stop" disabled>停止会话</button>
+    <span id="connection">正在连接</span>
+  </header>
+
+  <p id="risk" class="bad" role="alert"></p>
+  <p id="error" class="bad" role="alert"></p>
+
+  <section>
+    <div class="toolbar">
+      <h2>双边行情</h2>
+      <span id="validity">等待报价</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>市场 / 合约</th><th>Bid 买价</th><th>Ask 卖价</th><th>行情状态</th></tr></thead>
+        <tbody>
+          <tr><td>Binance <span id="binance-symbol"></span></td><td id="binance-bid">—</td><td id="binance-ask">—</td><td id="binance-health">—</td></tr>
+          <tr><td>MT5 <span id="mt5-symbol"></span></td><td id="mt5-bid">—</td><td id="mt5-ask">—</td><td id="mt5-health">—</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="spreads">
+      <p>A 入场价差 <strong id="a">—</strong> <span class="muted">Binance Ask − MT5 Ask</span></p>
+      <p>B 入场价差 <strong id="b">—</strong> <span class="muted">MT5 Bid − Binance Bid</span></p>
+      <p id="slot">执行槽 —</p>
+    </div>
   </section>
-  <section class="signals-grid">
-    <article class="panel signal"><div class="signal-title"><span class="direction-letter">A</span><h2>空 Binance ／ 多 MT5</h2><span id="a-state" class="signal-state">等待行情</span></div><div class="signal-values"><div><label>实时入场价差</label><strong id="a-spread">—</strong></div><span class="formula">Binance Ask − MT5 Ask</span></div></article>
-    <article class="panel signal"><div class="signal-title"><span class="direction-letter blue">B</span><h2>多 Binance ／ 空 MT5</h2><span id="b-state" class="signal-state">等待行情</span></div><div class="signal-values"><div><label>实时入场价差</label><strong id="b-spread">—</strong></div><span class="formula">MT5 Bid − Binance Bid</span></div></article>
-  </section>
-  <section class="account-strip" aria-label="账户信息"><article class="panel"><h2>MT5 账户</h2><p>权益 / 可用资金 / 持仓 <strong>—</strong></p><small>当前监控尚未接入账户数据</small></article><article class="panel"><h2>Binance 账户</h2><p>权益 / 可用资金 / 持仓 <strong>—</strong></p><small>当前使用公开行情，尚未接入账户数据</small></article><article class="panel"><h2>执行概况</h2><p>等待 <strong id="waiting-count">0</strong>　执行中 <strong id="active-count">0</strong>　暂停 <strong id="paused-count">0</strong></p><small>手续费 / 资金费 / 收益：尚未计算</small></article></section>
-  <section class="panel manual-panel" id="manual-orders">
-    <div class="section-heading"><div><h2>条件挂单工作台</h2><p>手动建单 · 独立条件 · 单笔串行执行</p></div><button id="open-condition" class="button-primary">＋ 添加挂单</button></div>
-    <dialog id="condition-dialog" aria-labelledby="condition-title"><div class="section-heading"><div><h2 id="condition-title">添加条件挂单</h2><p>创建后等待阈值及连续确认，不会立即无条件下单。</p></div><button id="close-condition" type="button" aria-label="关闭">×</button></div>
-    <form id="condition-form" class="condition-form">
-      <label>方向<select id="condition-direction"><option value="SHORT_BINANCE">A · 空 Binance / 多 MT5</option><option value="LONG_BINANCE">B · 多 Binance / 空 MT5</option></select></label>
-      <label>入场价差 ≥<input id="condition-entry" type="number" step="0.01" value="4.20" required></label>
-      <label>撤单价差 &lt;<input id="condition-cancel" type="number" step="0.01" value="4.00" required></label>
-      <label>Binance 数量<input id="condition-quantity" type="number" min="0.00000001" step="any" value="1" required></label>
-      <label>平仓价差 ≤（可留空）<input id="condition-exit" type="number" step="0.01" placeholder="留空则逐笔手动平仓" disabled></label>
-      <label class="repeat-option"><input id="condition-repeat" type="checkbox">仅此条件单循环</label>
-      <button id="condition-create" class="button-primary" type="submit" disabled>创建条件挂单</button>
+
+  <section>
+    <h2>创建条件单</h2>
+    <form id="form">
+      <label>方向
+        <select id="direction">
+          <option value="SHORT_BINANCE">A 空 Binance / 多 MT5</option>
+          <option value="LONG_BINANCE">B 多 Binance / 空 MT5</option>
+        </select>
+      </label>
+      <label>入场价差 ≥<input id="entry" type="number" step="any" required></label>
+      <label>取消价差 &lt;<input id="cancel" type="number" step="any" required></label>
+      <label>Binance 数量<input id="quantity" type="number" min="0.00000001" step="any" required></label>
+      <label>平仓价差 ≤<input id="exit" type="number" step="any" placeholder="实盘时填写" disabled></label>
+      <label class="check"><input id="repeat" type="checkbox">循环</label>
+      <button id="create" disabled>创建条件单</button>
     </form>
-    <p id="dialog-error" role="alert" hidden></p><p class="manual-note">数量为 Binance 合约数量，不是 MT5 手数。循环表示模拟挂单结束后，重新等待本条件。</p></dialog>
-    <div class="queue-toolbar"><div class="queue-tabs" role="group" aria-label="条件单筛选"><button data-queue-filter="active" aria-pressed="true">当前挂单</button><button data-queue-filter="finished" aria-pressed="false">已结束</button><button data-queue-filter="all" aria-pressed="false">全部</button></div><label>方向 <select id="queue-direction"><option value="all">全部方向</option><option value="SHORT_BINANCE">A · 空 Binance</option><option value="LONG_BINANCE">B · 多 Binance</option></select></label></div>
-    <p id="execution-slot" class="execution-slot" role="status">执行槽空闲</p>
-    <p class="manual-note">条件单先等待自己的价差阈值及连续确认，再创建模拟 Maker 挂单。上一笔撤单确认前，其他条件单不会进入执行；循环单每轮结束后排到队尾。当前阶段尚未模拟成交。</p>
-    <div class="table-wrap"><table><thead><tr><th>交易对 / 条件单</th><th>方向</th><th>入场 ≥ / 实时</th><th>撤单 &lt;</th><th>Binance 数量</th><th>循环</th><th>执行次数</th><th>状态 / 确认</th><th>操作</th></tr></thead><tbody id="conditions-body"><tr><td colspan="9" class="empty-row">尚无手动条件单，系统不会自动创建订单。</td></tr></tbody></table></div>
-    <p class="manual-note">刷新页面保留条件单；停止或重启监控后，待执行条件单暂停，需要逐笔恢复。</p>
+    <p class="muted">策略逐 Tick 判断。只有手动创建的条件单会进入执行队列；同一时间最多执行一笔，数量会按合约规格换算为 MT5 手数。</p>
   </section>
-  <section class="panel order-panel" id="live-positions" hidden><div class="section-heading"><div><h2>双边交易与持仓</h2><p>只操作本系统关联的仓位；开仓与平仓共享一个执行槽。</p></div><button id="close-all" class="button-primary">一键平仓 · 本系统持仓</button></div><div id="live-trades"></div></section>
-  <section class="analysis-grid" id="spread-analysis">
-    <article class="panel chart-panel"><div class="section-heading"><div><h2>双向价差</h2><p>最近 120 次页面采样 · 每次约 0.5 秒</p></div><span id="quote-validity" class="validity">等待行情</span></div><div class="chart-legend"><span><i class="legend-a"></i> A · 空 Binance</span><span><i class="legend-b"></i> B · 多 Binance</span></div><div class="chart-wrap"><canvas id="spread-chart" aria-label="两个套利方向的有效价差走势"></canvas><div id="chart-empty">启动监控后，查看有效报价的价差走势<small>无效行情显示为空档，不参与信号计算</small></div></div><div class="chart-footer"><span>报价时间差 <b id="quote-skew">—</b></span><span>行情有效时才绘制价差</span></div></article>
-    <article class="panel rules-panel"><div class="section-heading"><h2>共同风控规则</h2><span class="tiny-label">当前配置</span></div><dl><div><dt>连续确认</dt><dd id="confirmation-rule">—</dd></div><div><dt>行情年龄上限</dt><dd id="age-limit">—</dd></div><div><dt>跨市场时间差上限</dt><dd id="skew-limit">—</dd></div><div><dt>挂单等待上限</dt><dd id="pending-limit">—</dd></div></dl><div class="rule-note">条件失效会复位确认；过期或时间差超限时，禁止新增模拟挂单。</div></article>
+
+  <section>
+    <div class="toolbar">
+      <h2>条件单 / 持仓</h2>
+      <label class="check"><input id="finished" type="checkbox">显示已结束</label>
+      <button id="close-all" hidden disabled>平掉全部策略持仓</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>编号 / 队列</th><th>方向</th><th>当前 / Edge</th><th>入场 ≥</th><th>取消 &lt;</th><th>平仓 ≤</th><th>数量</th><th>循环</th><th>状态 / 确认</th><th>操作</th></tr></thead>
+        <tbody id="conditions"></tbody>
+      </table>
+    </div>
+    <p id="empty" class="muted">当前没有条件单</p>
   </section>
-  <section class="panel order-panel" id="orders"><div class="section-heading"><div><h2>历史模拟执行 <span class="count-badge" id="order-count">0</span></h2><p id="current-order">当前没有挂单</p></div><span class="tiny-label">最近 50 笔 · 本地 SQLite</span></div><div class="table-wrap"><table><thead><tr><th>创建时间</th><th>订单 ID</th><th>方向</th><th>挂单价</th><th>数量</th><th>状态</th></tr></thead><tbody id="orders-body"><tr><td colspan="6" class="empty-row">暂无模拟订单。满足连续确认条件后，订单会出现在这里。</td></tr></tbody></table></div><div id="history-error" class="history-error" hidden></div></section>
-  <section class="bottom-grid"><article class="panel events-panel" id="events"><div class="section-heading"><h2>运行事件</h2><span class="tiny-label">最近 50 条</span></div><div id="events-list" class="events-list"><p class="empty-message">启动后显示连接、信号、挂撤单和风险事件。</p></div></article><article class="panel paper-panel" id="paper"><span class="paper-eyebrow">了解当前模式</span><h2>Paper ≠ 实盘交易</h2><p>用真实行情检验策略条件，订单只存在于本地。</p><ul><li>读取 Binance 和 MT5 的真实报价</li><li>模拟 Maker 挂单、超时和撤单</li><li>不会发送真实订单或占用交易账户资金</li></ul><div class="paper-bottom">当前阶段尚未模拟成交、执行对冲或计算收益，因此这里不展示虚构的持仓和 PnL。</div></article></section>
-  <footer><span><i class="local-dot"></i> AURUM · 本地 Paper 监控</span><span>页面采样不会增加策略确认次数 <span id="last-update">· 等待更新</span></span></footer>
-</main>
-</body></html>
+
+  <details id="diagnostics"><summary>行情时效 / 执行限制</summary><pre id="diagnostic-text"></pre></details>
+  <details id="accounts"><summary>账户与策略持仓</summary><pre id="account-text"></pre></details>
+  <details id="detail-box"><summary>条件单详细信息</summary><pre id="detail"></pre></details>
+  <details><summary>交易记录 / 事件（按需加载）</summary><p><button id="refresh-records">加载最新记录</button></p><pre id="records">尚未加载</pre></details>
+
+  <p class="muted footer">Paper 模式只模拟成交，不向交易所发单。LIVE 模式才会发送真实双边订单。页面前台每 0.5 秒取一次紧凑状态，切到后台后每 5 秒刷新；策略仍逐 Tick 处理行情。</p>
+</body>
+</html>
