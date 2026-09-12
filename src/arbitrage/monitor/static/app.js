@@ -88,7 +88,7 @@ function renderConditions(snapshot){
       status += order ? " · 等待执行槽" : !snapshot.quotes_valid ? ` · ${reasons[snapshot.quote_reason] || "等待有效行情"}` : ` · ${c.confirmation.count}/${snapshot.config.min_ticks} Tick · ${c.confirmation.duration_ms}/${snapshot.config.min_duration_ms} ms`;
     }
     const row=body.insertRow();row.dataset.conditionId=c.request_id;
-    for(const value of [`GOLD · ${c.request_id.slice(0,8)} / #${c.queue_seq}`,c.direction === "SHORT_BINANCE" ? "A · 空 Binance" : "B · 多 Binance",`${c.entry_threshold} / ${fixed(c.raw_spread)}`,c.cancel_threshold,c.quantity,c.repeat?"循环":"单次",c.execution_count,status]){const cell=row.insertCell();cell.textContent=String(value);}
+    for(const value of [`${snapshot.config.symbols.binance} · ${c.request_id.slice(0,8)} / #${c.queue_seq}`,c.direction === "SHORT_BINANCE" ? "A · 空 Binance" : "B · 多 Binance",`${c.entry_threshold} / ${fixed(c.raw_spread)}`,c.cancel_threshold,c.quantity,c.repeat?"循环":"单次",c.execution_count,status]){const cell=row.insertCell();cell.textContent=String(value);}
     row.cells[1].className=c.direction === "SHORT_BINANCE"?"direction-a":"direction-b";
     row.cells[7].className=`condition-state state-${c.state.toLowerCase()}`;
     const actions=row.insertCell();

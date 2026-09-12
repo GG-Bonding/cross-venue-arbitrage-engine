@@ -2,6 +2,13 @@
 let queueFilter="active";
 let renderedMode=null;
 window.renderTrading=s=>{
+  const symbols=s.config.symbols;
+  const pair=document.querySelector(".pair-card>strong");
+  pair.firstChild.textContent=symbols.binance+" ";
+  pair.querySelector("small").textContent=symbols.mt5+" / "+symbols.binance;
+  document.querySelector(".eyebrow").textContent=symbols.binance+" · CROSS-VENUE ARBITRAGE";
+  document.querySelector("h1").firstChild.textContent=(symbols.binance.startsWith("BTC")?"比特币":symbols.binance.startsWith("XAU")?"黄金":symbols.binance)+"跨市场监控 ";
+  document.title=symbols.binance+" · 跨市场监控";
   const live=s.mode === "live";
   if(renderedMode!==s.mode){
     renderedMode=s.mode;
