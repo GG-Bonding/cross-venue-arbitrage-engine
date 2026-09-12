@@ -36,6 +36,21 @@ MT5 手数 = Binance 实际成交量 × 已核实的标的乘数 / MT5 合约大
 
 ## 成交与失败
 
+### 当前增量：平仓优先与事件唤醒
+
+Maker 等待期间仍累计已有 OPEN 的平仓确认。确认后先撤新挂单、核对累计成交，
+完成必要对冲/补偿，再由唯一执行槽关闭旧持仓。发平仓前复核最新有效行情和绝对阈值，
+机会消失则保持 OPEN；人工平仓不被自动阈值覆盖。
+未知结果保持 REVIEW/SAFE_MODE，本次不实现自动恢复，不盲目补单。
+
+Live 使用私有订单推送；重复/乱序不重复对冲，健康流每秒 REST 补查，断流立即唤醒 REST。
+行情/watchdog 可在慢 GET 期间判断撤单，按原 client ID 核对最终成交量。
+执行期间推迟非必要账户/历史采样，MT5 仍使用同一单线程。
+
+离线耗时报告：`python -m arbitrage.latency data/your-live.db`。
+报告读取记录的单调时钟差值，包含本地等待/落盘/发送前检查，不包含网络与交易端成交耗时。
+没有真实样本时不能据此判断实际性能；本轮只进行了离线验证。
+
 ### Maker ACK 与 Market RESULT
 
 - Maker 入场调用 `submit_maker(..., price=...)`，发送 LIMIT、GTX、newOrderRespType=ACK，
@@ -53,10 +68,10 @@ LONG 为 MT5 bid − 挂单买价。最新 Binance 盘口不改变已挂订单�
 
 ACK 拆分明确接口语义，可能额外增加一次查询；未实测下单延迟，不承诺性能提升，
 不声称 GTX + RESULT 一定阻塞到成交。后续耗时测量、行情唤醒撤单、并行检查、用户数据流及
-未知结果恢复计划见 [DEVELOPMENT.md](DEVELOPMENT.md)，均不属于本次实现。
+未知结果恢复的当前实现及边界见 [DEVELOPMENT.md](DEVELOPMENT.md)。
 
 1. 先持久化执行意图及唯一 Binance client order ID，再向平台提交一次。
-2. 使用 REST 查询累计成交；首次部分成交立即撤销剩余量，并查询最终状态，处理撤单与成交竞争。
+2. 使用订单推送与 REST 补查确认累计成交；首次部分成交立即撤销剩余量，并查询最终状态，处理撤单与成交竞争。
 3. 按最终实际成交量精确对冲 MT5。成交量不能表示为 MT5 手数、或 MT5 下单前检查明确拒绝，
    则用反方向平仓指令平掉 Binance 实际成交量，并将本次标记失败。
 4. HTTP 超时不能视为拒单：查询原 client ID，必要时撤销同一 ID，绝不重新提交入场。
@@ -71,14 +86,19 @@ ACK 拆分明确接口语义，可能额外增加一次查询；未实测下单�
 
 重启会暂停待入场条件单；已知 OPEN 持仓通过双边数量、方向、归属核对后可手动关闭。
 未完成的执行意图进入 REVIEW，不自动重发。出现 REVIEW 时，在平台检查相应 client ID、
-MT5 ticket 与成交回报；当前尚未实现自动恢复不确定交易或网页强制清除异常记录。
+MT5 ticket 与成交回报；本次没有实现自动恢复，也不提供网页强制清除异常记录。
 不可直接删除数据库或换库绕过账户敞口核对。
 
 ## 账户和收益
 
-账户数据约每 3 秒查询并显示采样时间；失败保留旧数据并显示错误。
+空闲时约每 3 秒采样账户，执行期间推迟；显示实际采样时间，失败保留旧数据并显示错误。
 成交记录来自 Binance userTrades、MT5 history_deals_get；完整回报才能计算已实现收益。
 Binance 与 MT5 分别按各自币种展示；非 USDT 手续费保留原币种记录。
+记录区可查看信号、实际开/平仓点差和入场损耗，缺失成交价格时留空。
+OPEN 列表报价估算收益点差 = 实际开仓点差 − 最新可平仓点差；过期报价不显示估算。
+两腿数量和计价单位对齐后，毛收益 = 配对标的数量 ×（实际开仓点差 − 实际平仓点差）。
+FAILED 补偿同样收集 Binance 开/平成交并进入 settlement_totals；不只统计成功交易。
+汇总按币种显示完整结算，未结算有成交尝试单列，不计作零收益；USD 与 USDT 不直接相加。
 Binance 资金费尚未分摊到单笔交易，不将未取得的费用写成零。
 当前未实现按合并净利润自动平仓、外部持仓导入、补仓、强平价计算或多交易对账户管理。
 
@@ -124,5 +144,5 @@ Paper 和 live 强制分库；live 账本还绑定 API Key 与 MT5 账户身份�
 - [Binance 账户 REST API](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/account)
 - [MT5 Python order_send](https://www.mql5.com/en/docs/python_metatrader5/mt5ordersend_py)
 
-实现采用独立订单轮询，不是用户数据流。REST 延迟或限流可能导致响应迟滞；
+实现采用用户数据流加 REST 异常补查。REST 延迟或限流仍可能导致响应迟滞；
 当前不承诺最大裸露时间，不应把本地接口测试视为真实账户验收。

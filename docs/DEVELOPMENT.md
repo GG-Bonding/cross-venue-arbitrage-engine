@@ -1,5 +1,67 @@
 # Phase 1 开发记录
 
+## 兑现点差优先（2026-09-13，基线 3acb08d）
+
+本地 main 与 fetch 后 origin/main 均为 `3acb08db023f175c59aa6f5143e0433a5e1b76e8`。
+用户将本轮改为以下三项。未提交的自动恢复草稿已备份到本机临时目录，
+移出运行路径；未知结果继续 REVIEW/SAFE_MODE。
+
+代码提交：`0b4e58c`（私有订单更新及离线统计）、`1560695`（实际点差与结算计算）、
+`7f96ca7`（平仓优先、事件执行和界面集成）。
+
+### 已完成范围
+
+1. 平仓优先：新 Maker 等待期间仍检查 OPEN 的平仓连续确认，入场重置不清除平仓确认。
+   无效行情重置全部确认。确认平仓后唤醒 Maker 撤原单，核对累计成交并完成必要对冲/补偿，
+   再由唯一执行槽平旧持仓。发平仓前复核最新行情和绝对阈值；机会消失仍 OPEN。
+   新挂单撤销后按原单次/循环规则结束或排队，不绕过入场条件；人工平仓不被阈值覆盖。
+2. 实际成交指标：保留 entry_spread，明确 signal_entry_spread，并从成交回报记录
+   actual_entry_spread、actual_exit_spread、entry_spread_loss。
+   gross_pnl = 配对标的数量 ×（实际开仓点差 − 实际平仓点差），缺失/无效价格留空。
+   OPEN 列表显示实际开仓点差减最新可平仓点差，标注报价估算，过期时不显示。
+   FAILED 补偿也收集开/平成交明细和 settlement。按需返回 settlement_totals，
+   包含成功和失败补偿，按币种汇总，单列未结算的有成交尝试；不把它们算作零收益。
+   不新增手续费模型或汇率换算；Binance 资金费未分摊，不能宣称完整账户净利润。
+3. 响应改进：行情/watchdog 唤醒撤单，慢 GET 为独立只读任务，ACK 首查也不阻塞撤单。
+   私有 ORDER_TRADE_UPDATE 只接受 POST 前登记的 client ID，校验方向和数量；
+   重复/乱序不重复对冲，推送可先于 ACK。部分成交仍先撤余量再核对最终量。
+   健康流每秒 REST 补查，断流立即唤醒 REST 并重连，listenKey 定时续期。
+   私有 WS 沿用配置的公开 WS 主机、路径 /private/ws，不将 Demo 切到正式环境。
+   独立库存检查并行；保留发单前最新报价复核；执行期间推迟非必要账户/历史采样，
+   MT5 仍使用同一单线程，已经开始的调用不强行取消。
+
+单调时钟 timings_ns 记录条件确认→POST 前、撤单成立→DELETE 前、
+首次本地发现成交→MT5 order_send 前；包含落盘、线程等待和检查，不含网络及交易端执行。
+只在实际发送边界采样，缺失不伪造零，复用交易落盘，不增加每 Tick 日志/写库。
+`python -m arbitrage.latency <数据库>` 只读最新交易，离线统计 count/P50/P95/P99。
+评价同时查看 entry_spread_loss 和所有成交尝试结算，延迟下降本身不证明收益改善。
+
+### 验证
+
+新增测试修复前 **3 failed**：双向忙碌 worker 阻止平仓确认，以及缺少实际点差字段。
+此前测试启动遇到 Windows 临时目录权限错误，正常本地权限运行后取得有效失败证据。
+回归覆盖慢 ACK 抢占、撤单成交、未知结果、机会消失、双向收益公式、缺失价格、
+失败补偿、币种隔离、推送重复/乱序/先于 ACK、断流回退及并行检查。
+最终全量 pytest **174 passed**；`ruff check .`、`ruff format --check .`、
+`git diff --check` 全部通过，未发现遗留统一 `.submit()` 调用。
+离线 demo 使用独立 `data/demo-execution-20260913.db`，完成挂单→撤单→IDLE。
+本机没有 Node，前端脚本改用 V8 解析通过；未进行浏览器交互或真实账户验收。
+未连接真实账户下单，没有重启现有交易会话，不承诺真实延迟或收益提升。
+
+### 后续（本次不实现）
+
+- 部分成交保留可精确配对部分，只补偿余量，先完善数量账本及退出数量。
+- 可选改善 1 tick，仍满足原阈值且不跨价；不做持续撤单追价。
+- 未知结果自动核对原订单、成交记录和双边持仓；证明缺口后才补偿，证据不足仍 REVIEW。
+- 可选每单目标收益点差平仓；本次保留绝对平仓阈值。
+- 由操作者另行真实验收完整交易收益、点差损耗及耗时分位数。
+
+接口依据：
+- [Binance listenKey](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/user-data-streams)
+- [Binance 私有 WS 路由公告](https://www.binance.com/en/support/announcement/detail/ebf9b0aa9eca4ff3804eef6fb09ba32a)
+
+以下为历史记录，“未实现”表示当时的提交范围。
+
 ## 执行正确性修复（2026-09-12）
 
 开始基线：`6e981ce`（本地 main 与 fetch 后的 origin/main 一致，工作区干净）。
