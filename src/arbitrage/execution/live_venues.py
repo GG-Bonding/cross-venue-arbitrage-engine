@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 from decimal import Decimal
+from time import monotonic_ns
 from urllib.parse import urlencode
 
 import aiohttp
@@ -30,6 +31,7 @@ class BinanceTrading:
         self.key = key
         self.secret = secret.encode()
         self.offset = 0
+        self.dispatch_observer = None
 
     async def request(self, method, path, **params):
         params.update(timestamp=now_ms() + self.offset, recvWindow=5000)
@@ -37,6 +39,9 @@ class BinanceTrading:
         signature = hmac.new(self.secret, query.encode(), hashlib.sha256).hexdigest()
         url = self.settings.market.binance_rest_url.rstrip("/") + path
         try:
+            if self.dispatch_observer and path == "/fapi/v1/order" and method in {"POST", "DELETE"}:
+                client = params.get("newClientOrderId", params.get("origClientOrderId"))
+                self.dispatch_observer(client, monotonic_ns())
             async with self.session.request(
                 method,
                 url,
@@ -197,6 +202,7 @@ class BinanceTrading:
 class MT5Trading:
     def __init__(self, market):
         self.market, self.api, self.settings = market, market.api, market.settings
+        self.dispatch_observer = None
 
     async def initialize(self):
         await self.market._call(self._check)
@@ -286,6 +292,8 @@ class MT5Trading:
         check = self.api.order_check(request)
         if check is None or check.retcode != 0:
             raise OrderRejected("MT5 order_check rejected")
+        if self.dispatch_observer:
+            self.dispatch_observer(tag, monotonic_ns())
         result = self.api.order_send(request)
         if result is None:
             raise ExecutionUnknown("MT5 order_send returned no result; do not retry")

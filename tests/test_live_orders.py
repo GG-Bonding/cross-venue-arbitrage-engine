@@ -1,3 +1,4 @@
+import asyncio
 from decimal import Decimal as D
 
 import pytest
@@ -11,6 +12,129 @@ from arbitrage.execution.live_venues import ExecutionUnknown, OrderRejected
 from arbitrage.main import read_status
 from arbitrage.persistence.sqlite_repository import SQLiteRepository
 from arbitrage.strategy.live_orders import LiveOrderStrategy
+
+
+@pytest.mark.parametrize("direction", ["SHORT_BINANCE", "LONG_BINANCE"])
+async def test_exit_confirmation_survives_busy_entry_worker(tmp_path, monkeypatch, direction):
+    async with SQLiteRepository(tmp_path / "exit.db") as repo:
+        e = engine(repo, monkeypatch)
+        await e.start(900)
+        r = request()
+        await command(e, "create", r)
+        await trigger(e)
+        c = e.conditions[r["request_id"]]
+        c.direction, c.exit_threshold = direction, D("10")
+        gate = asyncio.Event()
+        e.worker = asyncio.create_task(gate.wait())
+        try:
+            for ts in (1300, 1400, 1500):
+                await e.on_quotes(quote("4416.90", "4416.98", ts), quote(ts=ts), ts)
+            assert c.close_requested
+            assert c.close_reason == "threshold"
+            assert len(e.binance.sent) == 1
+        finally:
+            gate.set()
+            await e.worker
+            await e.shutdown(1500)
+
+
+async def test_actual_spreads_and_compensation_settlement(tmp_path, monkeypatch):
+    async with SQLiteRepository(tmp_path / "pnl.db") as repo:
+        e = engine(repo, monkeypatch)
+        await e.start(900)
+        r = request()
+        await command(e, "create", r)
+        await trigger(e)
+        t = next(iter(e.trades.values()))
+        assert D(t["actual_entry_spread"]) == 0  # Both actual fills are 4400.
+        assert D(t["signal_entry_spread"]) > 4
+        view = e.condition_views(1200)[0]
+        assert D(view["estimated_spread_gain"]) < 0
+        await command(e, "close", r["request_id"], 1200)
+        await e.worker
+        assert D(t["actual_exit_spread"]) == 0
+        assert D(t["gross_pnl"]) == 0
+        e.binance.fill = D("0.5")
+        await command(e, "create", request())
+        await trigger(e)
+        failed = list(e.trades.values())[-1]
+        assert failed["state"] == "FAILED"
+        queried = []
+
+        async def trades(order_id):
+            queried.append(order_id)
+            return [dict(qty="0.5", realizedPnl="-0.25", commission="0", commissionAsset="USDT")]
+
+        e.binance.trades = trades
+        await e._accounts()
+        assert failed["binance_open"]["orderId"] in queried
+        assert failed["settlement"]["summary"]["binance_net"] == D("-0.5")
+        await e.shutdown(1400)
+
+
+@pytest.mark.parametrize("outcome", ["zero", "filled", "unknown", "vanished"])
+async def test_confirmed_exit_cancels_pending_entry_before_closing(tmp_path, monkeypatch, outcome):
+    async with SQLiteRepository(tmp_path / "priority.db") as repo:
+        e = engine(repo, monkeypatch)
+        await e.start(900)
+        r = request()
+        await command(e, "create", r)
+        await trigger(e)
+        old = e.conditions[r["request_id"]]
+        current = [1200]
+        monkeypatch.setattr("arbitrage.strategy.live_orders.now_ms", lambda: current[0])
+        waiting = asyncio.Event()
+        ids = []
+
+        async def maker(client, side, position_side, quantity, *, price):
+            ids.append(client)
+            e.binance.sent.append((side, position_side, quantity, price))
+            return {"orderId": 2}  # Initial ACK query is deliberately slow.
+
+        async def query(client):
+            assert client == ids[0]
+            waiting.set()
+            await asyncio.Event().wait()
+
+        async def cancel(client):
+            assert client == ids[0]
+            e.binance.canceled += 1
+            if outcome == "unknown":
+                raise ExecutionUnknown("unconfirmed cancel")
+            qty = D(1) if outcome == "filled" else D(0)
+            e.binance.amounts["SHORT"] += qty
+            return dict(status="CANCELED", executedQty=str(qty), orderId=2, avgPrice="4400")
+
+        e.binance.submit_maker, e.binance.order, e.binance.cancel = maker, query, cancel
+        await command(e, "create", request())
+        for ts in (1300, 1400, 1500):
+            current[0] = ts
+            await e.on_quotes(quote("4416.90", "4416.98", ts), quote(ts=ts), ts)
+        await asyncio.wait_for(waiting.wait(), 1)
+        old.exit_threshold = D(5)
+        try:
+            for ts in (1600, 1700, 1800):
+                current[0] = ts
+                await e.on_quotes(quote("4416.90", "4416.98", ts), quote(ts=ts), ts)
+            await asyncio.wait_for(asyncio.shield(e.worker), 1)
+            assert e.binance.canceled == 1
+            assert len(ids) == 1
+            assert len(e.binance.sent) == 2  # No exit before original maker reconciliation.
+            if outcome == "filled":
+                assert len(e.mt5.sent) == 2  # Newly proven fill has been hedged first.
+            if outcome == "vanished":
+                e.binance_quote = quote("4426", "4427", 1800)
+            await e.on_timer(1800)
+            await e.worker
+            if outcome in {"vanished", "unknown"}:
+                assert len(e.binance.sent) == 2
+                assert old.state == "OPEN"
+            else:
+                assert len(e.binance.sent) == 3
+                assert e.mt5.sent[-1][2] == 101
+                assert old.state == "DONE"
+        finally:
+            await e.shutdown(1800)
 
 
 class Binance:
@@ -41,6 +165,9 @@ class Binance:
         return await self._submit(client_id, side, position_side, quantity)
 
     async def _submit(self, client_id, side, position_side, quantity, *, price=None):
+        from arbitrage.strategy.live_orders import monotonic_ns
+
+        self.dispatch_observer(client_id, monotonic_ns())
         self.sent.append((side, position_side, quantity, price))
         if self.error:
             raise self.error
@@ -83,6 +210,9 @@ class MT5:
         return self.rows.copy()
 
     async def send(self, tag, buy, lots, *, ticket=None):
+        from arbitrage.strategy.live_orders import monotonic_ns
+
+        self.dispatch_observer(tag, monotonic_ns())
         self.sent.append((buy, lots, ticket))
         if self.error:
             raise self.error
@@ -237,6 +367,160 @@ async def test_live_no_manual_request_never_sends(tmp_path, monkeypatch):
         await trigger(e)
         assert e.binance.sent == e.mt5.sent == []
         await e.shutdown(1400)
+
+
+async def test_execution_timings_use_monotonic_clock_and_persist(tmp_path, monkeypatch):
+    import itertools
+
+    clock = itertools.count(0, 1000000)
+    monkeypatch.setattr("arbitrage.strategy.live_orders.monotonic_ns", lambda: next(clock))
+    async with SQLiteRepository(tmp_path / "live.db") as repo:
+        e = engine(repo, monkeypatch)
+        await e.start(900)
+        await command(e, "create", request())
+        await trigger(e)
+        saved = (await repo.load_trades())[0]
+        assert saved["timings_ns"]["entry_dispatch"] > 0
+        assert saved["timings_ns"]["hedge_dispatch"] > 0
+        assert "cancel_dispatch" not in saved["timings_ns"]
+        assert len(e.binance.sent) == len(e.mt5.sent) == 1
+        await e.shutdown(1400)
+
+
+async def test_quote_cancel_does_not_wait_for_slow_order_query(tmp_path, monkeypatch):
+    async with SQLiteRepository(tmp_path / "live.db") as repo:
+        e = engine(repo, monkeypatch)
+        await e.start(900)
+        e.binance.fill = D(0)
+        r = request()
+        await command(e, "create", r)
+        started, canceled = asyncio.Event(), asyncio.Event()
+
+        async def slow_query(client_id):
+            started.set()
+            await asyncio.Event().wait()
+
+        async def cancel(client_id):
+            e.binance.canceled += 1
+            canceled.set()
+            return {"status": "CANCELED", "executedQty": "0"}
+
+        e.binance.order, e.binance.cancel = slow_query, cancel
+        for ts in (1000, 1100, 1200):
+            await e.on_quotes(quote("4416.90", "4416.98", ts), quote(ts=ts), ts)
+        await asyncio.wait_for(started.wait(), 1)
+        e.conditions[r["request_id"]].cancel_requested = True
+        try:
+            await asyncio.wait_for(canceled.wait(), 0.5)
+        finally:
+            if not canceled.is_set():
+                e.worker.cancel()
+            await asyncio.gather(e.worker, return_exceptions=True)
+        assert e.binance.canceled == 1
+        assert len(e.binance.sent) == 1 and not e.mt5.sent
+
+
+async def test_fill_push_before_ack_hedges_once_without_rest_query(tmp_path, monkeypatch):
+    async with SQLiteRepository(tmp_path / "live.db") as repo:
+        e = engine(repo, monkeypatch)
+        await e.start(900)
+        await command(e, "create", request())
+
+        async def submit(client, side, position_side, quantity, *, price):
+            e.binance.sent.append(client)
+            payload = {
+                "e": "ORDER_TRADE_UPDATE",
+                "T": 1200,
+                "o": {
+                    "s": "XAUUSDT",
+                    "c": client,
+                    "i": 1,
+                    "X": "FILLED",
+                    "z": "1",
+                    "ap": "4417",
+                    "ps": "SHORT",
+                    "S": "SELL",
+                    "q": "1",
+                },
+            }
+            e.on_user_event(payload)
+            e.on_user_event(payload)
+            assert not e.mt5.sent
+            return {"orderId": 1}
+
+        async def unexpected_query(client):
+            raise AssertionError("Complete push already supplies execution evidence")
+
+        e.binance.submit_maker, e.binance.order = submit, unexpected_query
+        await trigger(e)
+        assert len(e.binance.sent) == len(e.mt5.sent) == 1
+        assert next(iter(e.conditions.values())).state == "OPEN"
+        await e.shutdown(1400)
+
+
+async def test_inventory_checks_start_independently_and_accounts_defer(tmp_path, monkeypatch):
+    async with SQLiteRepository(tmp_path / "live.db") as repo:
+        e = engine(repo, monkeypatch)
+        await e.start(900)
+        entered = []
+        ready = asyncio.Event()
+
+        async def read(name, result):
+            entered.append(name)
+            if len(entered) == 3:
+                ready.set()
+            await ready.wait()
+            return result
+
+        e.binance.open_orders = lambda: read("orders", [])
+        e.binance.inventory = lambda: read("inventory", [])
+        e.mt5.positions = lambda: read("mt5", [])
+        await asyncio.wait_for(e._inventory_check(), 1)
+        assert set(entered) == {"orders", "inventory", "mt5"}
+        busy = asyncio.Event()
+        e.worker = asyncio.create_task(busy.wait())
+        e.accounts_updated_ms = 0
+        await e.on_timer(10000)
+        assert e.account_worker is None
+        busy.set()
+        await e.worker
+        e.worker = None
+        await e.shutdown(1400)
+
+
+async def test_disconnected_stream_wakes_rest_without_healthy_stream_delay(tmp_path, monkeypatch):
+    from arbitrage.execution.binance_maker import CancelPolicy
+
+    async with SQLiteRepository(tmp_path / "disconnect.db") as repo:
+        e = engine(repo, monkeypatch)
+        await e.start(900)
+        r = request()
+        await command(e, "create", r)
+        c = e.conditions[r["request_id"]]
+        e.binance_quote, e.mt5_quote = quote("4416.90", "4416.98", 1200), quote(ts=1200)
+        e.user_updates.connected = True
+        queried = []
+
+        async def query(client):
+            queried.append(client)
+            return dict(status="CANCELED", executedQty="0")
+
+        e.binance.order = query
+        t = dict(open_client_id="original", price="4416.98", created_at_ms=1200)
+        task = asyncio.create_task(e._query_or_cancel(c, t, CancelPolicy(D(4), 50, 2000), {}))
+        try:
+            await asyncio.sleep(0)
+            assert not queried
+            e.user_updates.connected = False
+            e.execution_wakeup.set()
+            result = await asyncio.wait_for(task, 0.5)
+            assert result["executedQty"] == "0"
+            assert queried == ["original"]
+            assert not e.binance.sent and not e.mt5.sent
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await e.shutdown(1200)
 
 
 @pytest.mark.parametrize("direction", ["SHORT_BINANCE", "LONG_BINANCE"])

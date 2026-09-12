@@ -3,6 +3,7 @@
 import asyncio
 from dataclasses import asdict
 from decimal import Decimal
+from time import monotonic_ns
 from uuid import uuid4
 
 from arbitrage.domain.conditional_order import ConditionalOrder, ConditionalRequest
@@ -10,9 +11,11 @@ from arbitrage.domain.enums import StrategyState
 from arbitrage.domain.specs import HedgeCalculator, round_step
 from arbitrage.execution.binance_maker import CancelPolicy
 from arbitrage.execution.live_venues import ExecutionUnknown, OrderRejected
+from arbitrage.execution.user_stream import OrderUpdates
 from arbitrage.observability import now_ms
 from arbitrage.strategy.manual_orders import ManualOrderStrategy
 from arbitrage.strategy.spread import entry_spread, pending_spread
+from arbitrage.strategy.trade_metrics import update_metrics
 
 D = Decimal
 END = {"FILLED", "CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"}
@@ -36,6 +39,33 @@ class LiveOrderStrategy(ManualOrderStrategy):
         self.accounts_error = None
         self.risk_error = None
         self.account_worker = None
+        self.execution_wakeup = asyncio.Event()
+        self.user_updates = OrderUpdates(settings.symbol.binance)
+        self.dispatch_starts = {}
+        self.binance.dispatch_observer = self._dispatched
+        self.mt5.dispatch_observer = self._dispatched
+
+    def _dispatched(self, client, stamp):
+        sample = self.dispatch_starts.pop(client, None)
+        if sample:
+            t, stage, start = sample
+            t.setdefault("timings_ns", {})[stage] = stamp - start
+
+    def _measure_dispatch(self, client, t, stage, start):
+        self.dispatch_starts[client] = (t, stage, start)
+
+    def _reset_waiting(self):
+        # Entry reservations must not erase a different position's exit confirmation.
+        for key, confirmation in self.condition_confirmations.items():
+            if not key.startswith("exit:"):
+                confirmation.reset()
+
+    def _close_queued(self):
+        return any(c.state == "OPEN" and c.close_requested for c in self.conditions.values())
+
+    def on_user_event(self, payload):
+        if self.user_updates.feed(payload):
+            self.execution_wakeup.set()
 
     async def start(self, now):
         await self.repo.bind_mode("live")
@@ -91,10 +121,12 @@ class LiveOrderStrategy(ManualOrderStrategy):
         await self._accounts()
 
     async def _inventory_check(self):
-        if await self.binance.open_orders():
+        orders, positions, inventory = await asyncio.gather(
+            self.binance.open_orders(), self.mt5.positions(), self.binance.inventory()
+        )
+        if orders:
             raise ExecutionUnknown("Binance 存在未核对挂单，禁止继续执行")
         expected = {"LONG": D(0), "SHORT": D(0)}
-        positions = await self.mt5.positions()
         owned = set()
         for t in self.trades.values():
             if t["state"] == "REVIEW":
@@ -112,7 +144,7 @@ class LiveOrderStrategy(ManualOrderStrategy):
         if any(p["ticket"] not in owned for p in positions):
             raise ExecutionUnknown("MT5 本品种存在外部持仓；请使用独立账户或品种")
         actual = {"LONG": D(0), "SHORT": D(0)}
-        for p in await self.binance.inventory():
+        for p in inventory:
             if p["positionSide"] not in actual:
                 if D(p["positionAmt"]):
                     raise ExecutionUnknown("Binance 持仓模式不一致")
@@ -149,6 +181,7 @@ class LiveOrderStrategy(ManualOrderStrategy):
             c.close_requested = True
             c.close_reason = "threshold" if action == "close_threshold" else "manual"
             await self.repo.save_condition(c, "live_close_queued", now)
+            self.execution_wakeup.set()
             return asdict(c)
         if action == "cancel":
             c = self.conditions.get(payload)
@@ -178,29 +211,30 @@ class LiveOrderStrategy(ManualOrderStrategy):
                     )
                     break
         if self.guard.check(self.binance_quote, self.mt5_quote, now) is not None:
-            self._reset_waiting()
+            for confirmation in self.condition_confirmations.values():
+                confirmation.reset()
         if (
-            self.account_worker is None or self.account_worker.done()
-        ) and now - self.accounts_updated_ms > 3000:
+            (self.worker is None or self.worker.done())
+            and not self.stopping
+            and (self.account_worker is None or self.account_worker.done())
+            and now - self.accounts_updated_ms > 3000
+        ):
             self.account_worker = asyncio.create_task(self._accounts())
 
     async def on_quotes(self, binance, mt5, now):
         self.binance_quote, self.mt5_quote = binance, mt5
+        self.execution_wakeup.set()
         await self.on_timer(now)
         key = tuple((q.exchange_ts_ms, q.bid, q.ask, q.bid_qty, q.ask_qty) for q in (binance, mt5))
         changed = key != self.last_manual_key
         self.last_manual_key = key
-        if (
-            self.stopping
-            or self.state == StrategyState.SAFE_MODE
-            or (self.worker and not self.worker.done())
-        ):
+        if self.stopping or self.state == StrategyState.SAFE_MODE:
             self._reset_waiting()
             return {}
         if self.guard.check(binance, mt5, now) or not changed:
             return {}
         for c in sorted(self.conditions.values(), key=lambda c: c.queue_seq):
-            if c.state == "OPEN" and c.exit_threshold is not None:
+            if c.state == "OPEN" and c.exit_threshold is not None and not c.close_requested:
                 cost = (
                     binance.ask - mt5.bid
                     if c.direction == "SHORT_BINANCE"
@@ -213,7 +247,9 @@ class LiveOrderStrategy(ManualOrderStrategy):
                     == "CONFIRMED"
                 ):
                     await self._apply_command("close_threshold", c.request_id, now)
-                    return {}
+        if self._close_queued() or (self.worker and not self.worker.done()):
+            self._reset_waiting()
+            return {}
         eligible = []
         for c in self.conditions.values():
             if c.state == "WAITING":
@@ -221,19 +257,42 @@ class LiveOrderStrategy(ManualOrderStrategy):
                 if self._confirmation(c.request_id).update(spread.edge, now).state == "CONFIRMED":
                     eligible.append(c)
         if eligible:
+            confirmed_ns = monotonic_ns()
             c = min(eligible, key=lambda c: c.queue_seq)
             c.state = "EXECUTING"
             self.active_condition_id = c.request_id
             await self.repo.save_condition(c, "live_condition_reserved", now)
-            self.worker = asyncio.create_task(self._execute(c))
+            self.worker = asyncio.create_task(self._execute(c, confirmed_ns=confirmed_ns))
             self._reset_waiting()
         return {}
 
     async def _save(self, t, event):
+        update_metrics(t, self.hedge.underlying_per_binance_qty)
         t["updated_at_ms"] = now_ms()
         await self.repo.save_trade(t, event)
 
-    async def _execute(self, c, trade=None, *, closing=False):
+    def condition_views(self, now):
+        views = super().condition_views(now)
+        valid = self.guard.check(self.binance_quote, self.mt5_quote, now) is None
+        for view in views:
+            t = self.trades.get(view["execution_order_id"], {})
+            for key in (
+                "signal_entry_spread",
+                "actual_entry_spread",
+                "actual_exit_spread",
+                "entry_spread_loss",
+                "gross_pnl",
+                "compensation_gross_pnl",
+            ):
+                view[key] = t.get(key)
+            view["estimated_spread_gain"] = None
+            if t.get("state") == "OPEN" and t.get("actual_entry_spread") is not None and valid:
+                b, m = self.binance_quote, self.mt5_quote
+                cost = b.ask - m.bid if t["sell"] else m.ask - b.bid
+                view["estimated_spread_gain"] = str(D(t["actual_entry_spread"]) - cost)
+        return views
+
+    async def _execute(self, c, trade=None, *, closing=False, confirmed_ns=None):
         t = trade
         try:
             await self._inventory_check()
@@ -249,7 +308,12 @@ class LiveOrderStrategy(ManualOrderStrategy):
             else:
                 # Preflight API calls may outlast quote freshness or change the spread.
                 b, m, now = self.binance_quote, self.mt5_quote, now_ms()
-                if self.stopping or c.cancel_requested or self.guard.check(b, m, now):
+                if (
+                    self.stopping
+                    or c.cancel_requested
+                    or self._close_queued()
+                    or self.guard.check(b, m, now)
+                ):
                     c.state = "CANCELED" if c.cancel_requested else "WAITING"
                     return
                 if entry_spread(c.direction, b, m, c.entry_threshold).edge < 0:
@@ -275,11 +339,14 @@ class LiveOrderStrategy(ManualOrderStrategy):
                     open_client_id="au" + trade_id,
                     direction=c.direction,
                     entry_spread=str(entry_spread(c.direction, b, m, c.entry_threshold).raw_spread),
+                    signal_entry_spread=str(
+                        entry_spread(c.direction, b, m, c.entry_threshold).raw_spread
+                    ),
                 )
                 self.trades[trade_id] = t
                 c.execution_order_id = trade_id
                 await self.repo.save_condition(c, "live_execution_linked", now)
-                await self._open(c, t)
+                await self._open(c, t, confirmed_ns=confirmed_ns)
             if t["state"] == "OPEN":
                 c.state = "OPEN"
                 c.execution_count += 1
@@ -310,8 +377,15 @@ class LiveOrderStrategy(ManualOrderStrategy):
         except Exception as exc:
             await self._review(c, t, exc)
         finally:
+            if t:
+                self.user_updates.forget(t["open_client_id"])
+                self.dispatch_starts.pop(t["open_client_id"], None)
+                self.dispatch_starts.pop("au" + t["trade_id"][:20], None)
             self.active_condition_id = None
             self._reset_waiting()
+            confirmation = self.condition_confirmations.get("exit:" + c.request_id)
+            if confirmation:
+                confirmation.reset()
             await self.repo.save_condition(c, "live_condition_updated", now_ms())
 
     async def _review(self, c, t, exc):
@@ -322,9 +396,19 @@ class LiveOrderStrategy(ManualOrderStrategy):
             t["state"], t["error"] = "REVIEW", str(exc)
             await self._save(t, "live_execution_uncertain")
 
-    async def _open(self, c, t):
+    async def _open(self, c, t, *, confirmed_ns=None):
+        timings = t.setdefault("timings_ns", {})
+        fill_seen_ns = None
         await self._save(t, "live_entry_intent")  # Durable before any venue mutation.
+        self.user_updates.watch(
+            t["open_client_id"],
+            quantity=D(t["quantity"]),
+            S="SELL" if t["sell"] else "BUY",
+            ps=t["position_side"],
+        )
         try:
+            if confirmed_ns is not None:
+                self._measure_dispatch(t["open_client_id"], t, "entry_dispatch", confirmed_ns)
             result = await self.binance.submit_maker(
                 t["open_client_id"],
                 "SELL" if t["sell"] else "BUY",
@@ -332,14 +416,6 @@ class LiveOrderStrategy(ManualOrderStrategy):
                 D(t["quantity"]),
                 price=D(t["price"]),
             )
-            if "status" not in result or "executedQty" not in result:
-                # ACK proves acceptance only. Query failure is not a definitive entry rejection.
-                try:
-                    result = await self.binance.order(t["open_client_id"])
-                    if "status" not in result or "executedQty" not in result:
-                        raise ExecutionUnknown("Binance order query lacks execution evidence")
-                except OrderRejected:
-                    raise ExecutionUnknown("Accepted Binance order query unresolved") from None
         except ExecutionUnknown:
             # Cancel by the durable client ID; never send a second entry POST.
             result = await self.binance.cancel(t["open_client_id"])
@@ -350,25 +426,34 @@ class LiveOrderStrategy(ManualOrderStrategy):
             self.settings.maker.cancel_confirm_ms,
             self.settings.maker.max_pending_ms,
         )
+        if "status" not in result or "executedQty" not in result:
+            result = await self._query_or_cancel(c, t, policy, timings, immediate=True)
         while result["status"] not in END:
             # Freeze cumulative fill before hedging: cancel remaining quantity on the first fill.
             now = now_ms()
-            cancel = self.stopping or c.cancel_requested or D(result["executedQty"]) > 0
+            if D(result["executedQty"]) > 0 and fill_seen_ns is None:
+                fill_seen_ns = self.user_updates.first_fill_ns.get(t["open_client_id"])
+                if fill_seen_ns is None:
+                    fill_seen_ns = monotonic_ns()
+            cancel = (
+                self.stopping
+                or c.cancel_requested
+                or self._close_queued()
+                or D(result["executedQty"]) > 0
+            )
             if self.guard.check(self.binance_quote, self.mt5_quote, now):
                 cancel = True
             else:
                 spread = pending_spread(c.direction, D(t["price"]), self.mt5_quote)
                 cancel = cancel or policy.update(spread, now, t["created_at_ms"])
             if cancel:
+                cancel_ns = monotonic_ns()
                 t["state"] = "CANCEL_INTENT"
                 await self._save(t, "live_cancel_intent")
+                self._measure_dispatch(t["open_client_id"], t, "cancel_dispatch", cancel_ns)
                 result = await self.binance.cancel(t["open_client_id"])
                 break
-            await asyncio.sleep(self.settings.live.order_poll_ms / 1000)
-            try:
-                result = await self.binance.order(t["open_client_id"])
-            except (ExecutionUnknown, OrderRejected):
-                result = await self.binance.cancel(t["open_client_id"])
+            result = await self._query_or_cancel(c, t, policy, timings)
         if result.get("status") not in END or "executedQty" not in result:
             raise ExecutionUnknown("Binance final execution quantity unconfirmed")
         filled = D(result["executedQty"])
@@ -381,6 +466,10 @@ class LiveOrderStrategy(ManualOrderStrategy):
             return
         if filled > D(t["quantity"]):
             raise ExecutionUnknown("Binance fill exceeds requested quantity")
+        if fill_seen_ns is None:
+            fill_seen_ns = self.user_updates.first_fill_ns.get(t["open_client_id"])
+            if fill_seen_ns is None:
+                fill_seen_ns = monotonic_ns()
         try:
             lots = self.hedge.binance_to_lots(filled)
         except ValueError:
@@ -389,6 +478,7 @@ class LiveOrderStrategy(ManualOrderStrategy):
         t.update(state="HEDGE_INTENT", lots=str(lots))
         await self._save(t, "live_hedge_intent")
         try:
+            self._measure_dispatch("au" + t["trade_id"][:20], t, "hedge_dispatch", fill_seen_ns)
             result = await self.mt5.send("au" + t["trade_id"][:20], t["sell"], lots)
         except OrderRejected:
             await self._flatten_unhedged(t)
@@ -401,6 +491,63 @@ class LiveOrderStrategy(ManualOrderStrategy):
         p = matches[0]
         t.update(mt5_ticket=p["ticket"], mt5_identifier=p["identifier"], state="OPEN")
         await self._save(t, "live_pair_opened")
+
+    async def _query_or_cancel(self, c, t, policy, timings, *, immediate=False):
+        async def query(*, urgent=False):
+            # Healthy pushes are primary; REST periodically checks for silent gaps.
+            delay = 1 if self.user_updates.connected else self.settings.live.order_poll_ms / 1000
+            await asyncio.sleep(0 if immediate or urgent else delay)
+            return await self.binance.order(t["open_client_id"])
+
+        task = asyncio.create_task(query())
+        had_stream = self.user_updates.connected
+        try:
+            while True:
+                self.execution_wakeup.clear()
+                pushed = self.user_updates.get(t["open_client_id"])
+                if pushed and (pushed["status"] in END or D(pushed["executedQty"]) > 0):
+                    return pushed
+                if had_stream and not self.user_updates.connected and not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    task = asyncio.create_task(query(urgent=True))
+                    had_stream = False
+                now = now_ms()
+                invalid = self.guard.check(self.binance_quote, self.mt5_quote, now)
+                cancel = self.stopping or c.cancel_requested or self._close_queued() or invalid
+                if not cancel:
+                    cancel = policy.update(
+                        pending_spread(c.direction, D(t["price"]), self.mt5_quote),
+                        now,
+                        t["created_at_ms"],
+                    )
+                if cancel:
+                    stamp = monotonic_ns()
+                    t["state"] = "CANCEL_INTENT"
+                    await self._save(t, "live_cancel_intent")
+                    self._measure_dispatch(t["open_client_id"], t, "cancel_dispatch", stamp)
+                    return await self.binance.cancel(t["open_client_id"])
+                if task.done():
+                    try:
+                        result = task.result()
+                        if "status" not in result or "executedQty" not in result:
+                            raise ExecutionUnknown("Binance query lacks execution evidence")
+                        return result
+                    except (ExecutionUnknown, OrderRejected):
+                        return await self.binance.cancel(t["open_client_id"])
+                wake = asyncio.create_task(self.execution_wakeup.wait())
+                try:
+                    await asyncio.wait(
+                        (task, wake),
+                        timeout=self.settings.market.watchdog_ms / 1000,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    wake.cancel()
+                    await asyncio.gather(wake, return_exceptions=True)
+        finally:
+            task.cancel()  # This is a read-only GET, never an order submission.
+            await asyncio.gather(task, return_exceptions=True)
 
     async def _market_close_binance(self, t, key):
         t[key] = "au" + uuid4().hex
@@ -435,13 +582,25 @@ class LiveOrderStrategy(ManualOrderStrategy):
 
     async def _accounts(self):
         try:
+            if self.worker and not self.worker.done():
+                return
+            binance_account = await self.binance.account()
+            if self.worker and not self.worker.done():
+                return
             self.accounts = {
-                "binance": await self.binance.account(),
+                "binance": binance_account,
                 "mt5": await self.mt5.account(),
             }
             # Fee and realized PnL evidence remains separately denominated, never invented.
             for t in list(self.trades.values()):
-                if t["state"] == "CLOSED" and "settlement" not in t:
+                if self.worker and not self.worker.done():
+                    break
+                compensated = (
+                    t["state"] == "FAILED"
+                    and bool(t.get("compensate_client_id"))
+                    and "binance_close" in t
+                )
+                if (t["state"] == "CLOSED" or compensated) and "settlement" not in t:
                     trades = []
                     for key in ("binance_open", "binance_close"):
                         rows = await self.binance.trades(t[key]["orderId"])
@@ -449,8 +608,10 @@ class LiveOrderStrategy(ManualOrderStrategy):
                             break
                         trades.extend(rows)
                     else:
-                        deals = await self.mt5.deals(t["mt5_identifier"])
-                        if any(
+                        if self.worker and not self.worker.done():
+                            break
+                        deals = [] if compensated else await self.mt5.deals(t["mt5_identifier"])
+                        if not compensated and any(
                             sum((D(d["volume"]) for d in deals if d["entry"] == side), D(0))
                             != D(t["lots"])
                             for side in (0, 1)

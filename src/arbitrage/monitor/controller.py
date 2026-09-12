@@ -11,6 +11,7 @@ from arbitrage.market.runtime import run_market
 from arbitrage.observability import dumps, now_ms
 from arbitrage.risk.quote_guard import QuoteGuard
 from arbitrage.strategy.spread import entry_spread
+from arbitrage.strategy.trade_metrics import settlement_totals
 
 
 class EventBuffer(logging.Handler):
@@ -187,6 +188,7 @@ class MonitorController:
                     "accounts_updated_ms": getattr(engine, "accounts_updated_ms", None),
                     "accounts_error": getattr(engine, "accounts_error", None),
                     "trades": list(getattr(engine, "trades", {}).values()),
+                    "settlement_totals": settlement_totals(getattr(engine, "trades", {}).values()),
                     "entry_selection": {
                         "requested": config.entry.direction_mode,
                         "active": engine.direction_mode if engine and active else None,

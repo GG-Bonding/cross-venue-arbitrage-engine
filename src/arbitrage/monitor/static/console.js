@@ -63,13 +63,14 @@ function render(s){
  for(const [id,row] of rows)if(!ids.has(id)){row.remove();rows.delete(id);}
  for(const [index,c] of visible.entries()){
   let row=rows.get(c.request_id);
-  if(!row){row=document.createElement("tr");for(let i=0;i<10;i++)row.insertCell();row.dataset.id=c.request_id;rows.set(c.request_id,row);}
+  if(!row){row=document.createElement("tr");for(let i=0;i<11;i++)row.insertCell();row.dataset.id=c.request_id;rows.set(c.request_id,row);}
   row.condition=c;
   const values=[c.request_id.slice(0,8)+" / "+c.queue_seq,c.direction==="SHORT_BINANCE"?"A 空 Binance / 多 MT5":"B 多 Binance / 空 MT5",(c.raw_spread??"—")+" / "+(c.edge??"—"),c.entry_threshold,c.cancel_threshold,c.exit_threshold??"手动",c.quantity,c.repeat?"循环":"单次",(stateNames[c.state]||c.state)+(c.close_requested?" · 平仓排队":"")+(c.state==="WAITING"?" · "+c.confirmation.count+"/"+config.min_ticks+" Tick · "+c.confirmation.duration_ms+"/"+config.min_duration_ms+" ms":"")];
+  values.push("实入 "+(c.actual_entry_spread??"—")+" / 实出 "+(c.actual_exit_spread??"—")+" / 报价估算收益点差 "+(c.estimated_spread_gain??"—"));
   values.forEach((v,i)=>text(row.cells[i],v));
   const actions=c.state==="WAITING"?["pause","cancel"]:c.state==="PAUSED"?["resume","cancel"]:c.state==="OPEN"?["close"]:["EXECUTING","CANCELING"].includes(c.state)?["cancel"]:[];
   const signature=actions.join();
-  if(row.actions!==signature){row.actions=signature;row.cells[9].replaceChildren();for(const action of [...actions,"copy","detail"]){const b=document.createElement("button");text(b,({pause:"暂停",resume:"恢复",cancel:"取消",close:"平仓",copy:"复制",detail:"详情"})[action]);if(!["copy","detail"].includes(action))b.dataset.action=action;b.onclick=()=>{const v=row.condition;if(action==="copy")copy(v);else if(action==="detail"){text($("detail"),JSON.stringify(v,null,2));$("detail-box").open=true;}else command("/api/conditions/"+encodeURIComponent(v.request_id)+"/"+action);};row.cells[9].append(b);}}
+  if(row.actions!==signature){row.actions=signature;row.cells[10].replaceChildren();for(const action of [...actions,"copy","detail"]){const b=document.createElement("button");text(b,({pause:"暂停",resume:"恢复",cancel:"取消",close:"平仓",copy:"复制",detail:"详情"})[action]);if(!["copy","detail"].includes(action))b.dataset.action=action;b.onclick=()=>{const v=row.condition;if(action==="copy")copy(v);else if(action==="detail"){text($("detail"),JSON.stringify(v,null,2));$("detail-box").open=true;}else command("/api/conditions/"+encodeURIComponent(v.request_id)+"/"+action);};row.cells[10].append(b);}}
   const at=$("conditions").children[index];if(at!==row)$("conditions").insertBefore(row,at||null);
  }
  $("empty").hidden=visible.length>0;
@@ -85,7 +86,7 @@ $("diagnostics").ontoggle=()=>{if(current)render(current);};
 $("accounts").ontoggle=async()=>{if(!$("accounts").open)return;text($("account-text"),"加载中");try{const s=await request("/api/status");text($("account-text"),JSON.stringify({accounts:s.accounts,error:s.accounts_error,updated_at:s.accounts_updated_ms},null,2));}catch(e){text($("account-text"),e.message);}};
 $("refresh-records").onclick=async()=>{
  const b=$("refresh-records");b.disabled=true;
- try{const [s,h]=await Promise.all([request("/api/status"),request("/api/history")]);text($("records"),JSON.stringify({trades:s.trades,orders:h.orders,events:s.events},null,2));}
+ try{const [s,h]=await Promise.all([request("/api/status"),request("/api/history")]);text($("records"),JSON.stringify({settlement_totals:s.settlement_totals,note:"已结算尝试包含失败补偿；按币种统计，未分摊 Binance 资金费；未结算项不计作零收益",trades:s.trades,orders:h.orders,events:s.events},null,2));}
  catch(e){text($("records"),e.message);}finally{b.disabled=false;}
 };
 let polling=false;

@@ -129,6 +129,10 @@ async def _run_market(settings, *, duration, stop, on_engine) -> None:
                     group.create_task(mt5.stream(queue, stop)),
                     group.create_task(consume_quotes(engine, queue, stop)),
                 ]
+                if settings.mode == "live":
+                    from arbitrage.execution.user_stream import run_user_stream
+
+                    tasks.append(group.create_task(run_user_stream(engine.binance, engine, stop)))
                 if settings.mode == "paper":
                     tasks.append(
                         group.create_task(
