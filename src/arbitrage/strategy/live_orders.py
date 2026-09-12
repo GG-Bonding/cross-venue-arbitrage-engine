@@ -325,13 +325,21 @@ class LiveOrderStrategy(ManualOrderStrategy):
     async def _open(self, c, t):
         await self._save(t, "live_entry_intent")  # Durable before any venue mutation.
         try:
-            result = await self.binance.submit(
+            result = await self.binance.submit_maker(
                 t["open_client_id"],
                 "SELL" if t["sell"] else "BUY",
                 t["position_side"],
                 D(t["quantity"]),
                 price=D(t["price"]),
             )
+            if "status" not in result or "executedQty" not in result:
+                # ACK proves acceptance only. Query failure is not a definitive entry rejection.
+                try:
+                    result = await self.binance.order(t["open_client_id"])
+                    if "status" not in result or "executedQty" not in result:
+                        raise ExecutionUnknown("Binance order query lacks execution evidence")
+                except OrderRejected:
+                    raise ExecutionUnknown("Accepted Binance order query unresolved") from None
         except ExecutionUnknown:
             # Cancel by the durable client ID; never send a second entry POST.
             result = await self.binance.cancel(t["open_client_id"])
@@ -361,7 +369,11 @@ class LiveOrderStrategy(ManualOrderStrategy):
                 result = await self.binance.order(t["open_client_id"])
             except (ExecutionUnknown, OrderRejected):
                 result = await self.binance.cancel(t["open_client_id"])
+        if result.get("status") not in END or "executedQty" not in result:
+            raise ExecutionUnknown("Binance final execution quantity unconfirmed")
         filled = D(result["executedQty"])
+        if not filled.is_finite() or filled < 0:
+            raise ExecutionUnknown("Binance invalid cumulative fill")
         t.update(binance_open=result, filled_qty=str(filled))
         if not filled:
             t["state"] = "CANCELED"
@@ -393,7 +405,7 @@ class LiveOrderStrategy(ManualOrderStrategy):
     async def _market_close_binance(self, t, key):
         t[key] = "au" + uuid4().hex
         await self._save(t, "live_binance_close_intent")
-        result = await self.binance.submit(
+        result = await self.binance.submit_market(
             t[key], "BUY" if t["sell"] else "SELL", t["position_side"], D(t["filled_qty"])
         )
         if result["status"] != "FILLED" or D(result["executedQty"]) != D(t["filled_qty"]):

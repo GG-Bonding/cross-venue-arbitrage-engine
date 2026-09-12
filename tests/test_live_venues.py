@@ -24,16 +24,22 @@ async def test_binance_post_only_and_close_position_side():
         return {"status": "FILLED"}
 
     adapter.request = request
-    await adapter.submit("open-id", "SELL", "SHORT", D(1), price=D(4000))
-    await adapter.submit("close-id", "BUY", "SHORT", D(1))
+    await adapter.submit_maker("open-id", "SELL", "SHORT", D(1), price=D(4000))
+    await adapter.submit_market("close-id", "BUY", "SHORT", D(1))
     opening, closing = calls
     assert opening[2]["timeInForce"] == "GTX"
+    assert opening[2]["type"] == "LIMIT"
+    assert opening[2]["newOrderRespType"] == "ACK"
+    assert opening[2]["price"] == "4000"
+    assert closing[2]["newOrderRespType"] == "RESULT"
+    assert "price" not in closing[2] and "timeInForce" not in closing[2]
     assert opening[2]["positionSide"] == closing[2]["positionSide"] == "SHORT"
     assert closing[2]["type"] == "MARKET" and "reduceOnly" not in closing[2]
 
 
 @pytest.mark.parametrize("query_succeeds", [True, False])
-async def test_uncertain_binance_post_only_queries_never_resends(query_succeeds):
+@pytest.mark.parametrize("maker", [True, False])
+async def test_uncertain_binance_post_only_queries_never_resends(query_succeeds, maker):
     adapter = BinanceTrading(Settings(), None, key="test", secret="secret")
     methods = []
 
@@ -43,14 +49,17 @@ async def test_uncertain_binance_post_only_queries_never_resends(query_succeeds)
             raise ExecutionUnknown("network timeout")
         if not query_succeeds:
             raise OrderRejected("not found yet")
+        assert params["origClientOrderId"] == "stable-id"
         return {"status": "FILLED", "executedQty": "1"}
 
     adapter.request = request
+    submit = adapter.submit_maker if maker else adapter.submit_market
+    kwargs = {"price": D(4000)} if maker else {}
     if query_succeeds:
-        assert (await adapter.submit("stable-id", "SELL", "SHORT", D(1)))["status"] == "FILLED"
+        assert (await submit("stable-id", "SELL", "SHORT", D(1), **kwargs))["status"] == "FILLED"
     else:
         with pytest.raises(ExecutionUnknown):
-            await adapter.submit("stable-id", "SELL", "SHORT", D(1))
+            await submit("stable-id", "SELL", "SHORT", D(1), **kwargs)
     assert methods == ["POST", "GET"]
 
 
@@ -64,6 +73,28 @@ async def test_cancel_ack_uses_query_fill_not_delete_response():
 
     adapter.request = request
     assert (await adapter.cancel("id"))["executedQty"] == "0.75"
+
+
+@pytest.mark.parametrize("maker", [True, False])
+async def test_definitive_submission_rejection_is_not_retried(maker):
+    adapter = BinanceTrading(Settings(), None, key="test", secret="secret")
+    methods = []
+
+    async def reject(method, path, **params):
+        methods.append(method)
+        raise OrderRejected("definitive rejection")
+
+    adapter.request = reject
+    submit = adapter.submit_maker if maker else adapter.submit_market
+    with pytest.raises(OrderRejected, match="definitive rejection"):
+        await submit("id", "SELL", "SHORT", D(1), **({"price": D(4000)} if maker else {}))
+    assert methods == ["POST"]
+
+
+async def test_maker_requires_price():
+    adapter = BinanceTrading(Settings(), None, key="test", secret="secret")
+    with pytest.raises(TypeError):
+        await adapter.submit_maker("id", "SELL", "SHORT", D(1))
 
 
 async def test_missing_order_during_cancel_is_unknown_not_zero_fill():

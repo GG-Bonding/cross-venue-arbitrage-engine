@@ -86,18 +86,37 @@ class BinanceTrading:
     async def identity(self):
         return hashlib.sha256(self.key.encode()).hexdigest()
 
-    async def submit(self, client_id, side, position_side, quantity, *, price=None):
+    async def submit_maker(self, client_id, side, position_side, quantity, *, price):
+        return await self._submit(
+            client_id,
+            side,
+            position_side,
+            quantity,
+            type="LIMIT",
+            timeInForce="GTX",
+            newOrderRespType="ACK",
+            price=str(price),
+        )
+
+    async def submit_market(self, client_id, side, position_side, quantity):
+        return await self._submit(
+            client_id,
+            side,
+            position_side,
+            quantity,
+            type="MARKET",
+            newOrderRespType="RESULT",
+        )
+
+    async def _submit(self, client_id, side, position_side, quantity, **order_params):
         params = dict(
             symbol=self.settings.symbol.binance,
             side=side,
             positionSide=position_side,
             quantity=str(quantity),
             newClientOrderId=client_id,
-            newOrderRespType="RESULT",
+            **order_params,
         )
-        params["type"] = "LIMIT" if price is not None else "MARKET"
-        if price is not None:
-            params.update(price=str(price), timeInForce="GTX")
         try:
             return await self.request("POST", "/fapi/v1/order", **params)
         except ExecutionUnknown:

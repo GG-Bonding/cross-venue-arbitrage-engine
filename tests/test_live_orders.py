@@ -34,7 +34,13 @@ class Binance:
     async def open_orders(self):
         return []
 
-    async def submit(self, client_id, side, position_side, quantity, *, price=None):
+    async def submit_maker(self, client_id, side, position_side, quantity, *, price):
+        return await self._submit(client_id, side, position_side, quantity, price=price)
+
+    async def submit_market(self, client_id, side, position_side, quantity):
+        return await self._submit(client_id, side, position_side, quantity)
+
+    async def _submit(self, client_id, side, position_side, quantity, *, price=None):
         self.sent.append((side, position_side, quantity, price))
         if self.error:
             raise self.error
@@ -126,6 +132,68 @@ async def trigger(e):
         await e.on_quotes(quote("4416.90", "4416.98", ts), quote(ts=ts), ts)
     if e.worker:
         await e.worker
+
+
+@pytest.mark.parametrize("missing", ["both", "status", "executedQty"])
+@pytest.mark.parametrize(
+    "outcome", ["zero", "filled", "error_zero", "error_fill", "missing", "unknown"]
+)
+async def test_maker_ack_requires_original_order_reconciliation(
+    tmp_path, monkeypatch, missing, outcome
+):
+    async with SQLiteRepository(tmp_path / "live.db") as repo:
+        e = engine(repo, monkeypatch)
+        await e.start(900)
+        r = request()
+        await command(e, "create", r)
+        submitted, queried, canceled = [], [], []
+
+        async def ack(client_id, side, position_side, quantity, *, price):
+            submitted.append(client_id)
+            result = {"orderId": 1, "status": "NEW", "executedQty": "0"}
+            for field in ["status", "executedQty"] if missing == "both" else [missing]:
+                result.pop(field)
+            return result
+
+        def final():
+            filled = outcome in {"filled", "error_fill"}
+            return dict(
+                status="FILLED" if filled else "CANCELED",
+                executedQty="1" if filled else "0",
+                orderId=1,
+            )
+
+        async def query(client_id):
+            assert not e.mt5.sent  # Acceptance alone must never hedge.
+            queried.append(client_id)
+            if outcome == "missing":
+                raise OrderRejected("order not found")
+            if outcome.startswith("error") or outcome == "unknown":
+                raise ExecutionUnknown("query timeout")
+            return final()
+
+        async def cancel(client_id):
+            canceled.append(client_id)
+            if outcome in {"missing", "unknown"}:
+                raise ExecutionUnknown("final quantity unknown")
+            return final()
+
+        e.binance.submit_maker = ack
+        e.binance.order, e.binance.cancel = query, cancel
+        await trigger(e)
+        assert len(submitted) == 1
+        assert queried == submitted
+        assert canceled == (submitted if outcome not in {"zero", "filled"} else [])
+        c = e.conditions[r["request_id"]]
+        if outcome in {"missing", "unknown"}:
+            assert c.state == "REVIEW" and e.state == "SAFE_MODE"
+            assert not e.mt5.sent
+        elif outcome in {"filled", "error_fill"}:
+            assert c.state == "OPEN"
+            assert e.mt5.sent == [(True, D("0.01"), None)]
+        else:
+            assert c.state == "DONE" and not e.mt5.sent
+        await e.shutdown(1400)
 
 
 @pytest.mark.parametrize("direction", ["SHORT_BINANCE", "LONG_BINANCE"])
