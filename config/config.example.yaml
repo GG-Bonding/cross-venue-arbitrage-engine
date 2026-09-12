@@ -1,5 +1,10 @@
 mode: paper
 
+# Fill credentials only in the ignored local config/config.yaml.
+binance:
+  api_key: ""
+  api_secret: ""
+
 symbol:
   binance: XAUUSDT
   mt5: XAUUSD

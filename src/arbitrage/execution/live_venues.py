@@ -2,7 +2,6 @@
 
 import hashlib
 import hmac
-import os
 from decimal import Decimal
 from urllib.parse import urlencode
 
@@ -24,8 +23,12 @@ class OrderRejected(RuntimeError):
 class BinanceTrading:
     def __init__(self, settings, session, *, key=None, secret=None):
         self.settings, self.session = settings, session
-        self.key = key or os.environ["BINANCE_API_KEY"]
-        self.secret = (secret or os.environ["BINANCE_API_SECRET"]).encode()
+        if key is None and secret is None:
+            key, secret = settings.binance_credentials()
+        if not key or not secret:
+            raise ValueError("Binance requires both API key and secret")
+        self.key = key
+        self.secret = secret.encode()
         self.offset = 0
 
     async def request(self, method, path, **params):

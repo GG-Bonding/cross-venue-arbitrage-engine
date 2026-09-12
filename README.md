@@ -74,7 +74,9 @@ $env:TRADING_MODE = 'paper'
 不指定 `--duration` 时持续监控，Ctrl+C 关闭并撤销本地模拟挂单。
 MetaTrader5 二进制包需要与你的 Windows/Python 版本匹配；若安装失败，可用 Python 3.12 环境。
 通过 `mt5.terminal_path` 选择终端，通过 `symbol.mt5` 设置 Broker 实际符号。
-Paper 模式不读取 Binance API key，不发送签名请求，也不调用 MT5 下单函数。
+Paper 模式不发送 Binance 签名请求，也不调用 MT5 下单函数。
+API Key / Secret 可填写在本地 config/config.yaml 的 binance.api_key / binance.api_secret；
+本地配置被 Git 忽略，密钥不进入监控响应。配置方式见 [实盘说明](docs/LIVE_TRADING.md)。
 
 本地已有 `MetaTrader_init/terminal64.exe` 时，在 `config/config.yaml` 的
 `mt5.terminal_path` 填写该文件的绝对路径，程序复用终端保存的登录会话。

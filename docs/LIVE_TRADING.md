@@ -70,8 +70,20 @@ Binance 资金费尚未分摊到单笔交易，不将未取得的费用写成零
 确认账户模式符合要求后设置 live.enabled: true。
 单笔数量还受 live.max_binance_qty 限制。
 
-凭据只通过启动进程的环境变量读取，不通过网页、Git 或聊天传递。
-需要 BINANCE_API_KEY、BINANCE_API_SECRET，以及 CONFIRM_LIVE_TRADING=I_UNDERSTAND。
+凭据可以直接填写在被 Git 忽略的本地 config/config.yaml 或 config/live.yaml：
+
+```yaml
+binance:
+  api_key: "你的 API Key"
+  api_secret: "你的 API Secret"
+```
+
+完整的配置文件密钥优先；两项都留空时才读取 BINANCE_API_KEY、BINANCE_API_SECRET 环境变量。
+只填一项会拒绝执行，不会混用配置文件与环境变量的密钥。
+密钥字段不进入配置序列化、监控响应或配置错误日志。不要在 example 文件填写真实密钥。
+配置修改需要重新加载会话配置；目前最直接的方式是重启项目。
+仍需要 CONFIRM_LIVE_TRADING=I_UNDERSTAND 才能启用交易执行。
+填写密钥不会自动切换 Paper、Demo 或正式交易环境；Demo 接入需另行配置端点。
 程序不会自动读取 .env 文件。TRADING_MODE 环境变量会覆盖 YAML mode。
 
 配置齐全后由操作者显式启动：

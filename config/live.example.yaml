@@ -1,5 +1,8 @@
 # Copy to config/live.yaml. Disabled until every live prerequisite is configured.
 mode: live
+binance:
+  api_key: ""
+  api_secret: ""
 symbol:
   binance: XAUUSDT
   mt5: XAUUSD

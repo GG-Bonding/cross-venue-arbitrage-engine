@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Annotated, Literal, Self
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from arbitrage.domain.enums import EntryMode
 
@@ -13,7 +13,14 @@ FiniteDecimal = Annotated[Decimal, Field(allow_inf_nan=False, max_digits=18, dec
 
 
 class ConfigModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", validate_default=True, frozen=True)
+    model_config = ConfigDict(
+        extra="forbid", validate_default=True, frozen=True, hide_input_in_errors=True
+    )
+
+
+class BinanceCredentials(ConfigModel):
+    api_key: SecretStr = Field(default=SecretStr(""), exclude=True, repr=False)
+    api_secret: SecretStr = Field(default=SecretStr(""), exclude=True, repr=False)
 
 
 class ConfirmationConfig(ConfigModel):
@@ -81,6 +88,9 @@ class LiveConfig(ConfigModel):
 
 class Settings(ConfigModel):
     mode: Literal["paper", "live"] = "paper"
+    binance: BinanceCredentials = Field(
+        default_factory=BinanceCredentials, exclude=True, repr=False
+    )
     symbol: SymbolConfig = Field(default_factory=SymbolConfig)
     entry: EntryConfig = Field(default_factory=EntryConfig)
     maker: MakerConfig = Field(default_factory=MakerConfig)
@@ -89,6 +99,23 @@ class Settings(ConfigModel):
     trading: TradingConfig = Field(default_factory=TradingConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     live: LiveConfig = Field(default_factory=LiveConfig)
+
+    def binance_credentials(self) -> tuple[str, str]:
+        key = self.binance.api_key.get_secret_value().strip()
+        secret = self.binance.api_secret.get_secret_value().strip()
+        # Select a complete pair from one source; never mix accounts across sources.
+        if key or secret:
+            if not key or not secret:
+                raise ValueError("请同时填写 binance.api_key 和 binance.api_secret")
+            return key, secret
+        key = os.environ.get("BINANCE_API_KEY", "").strip()
+        secret = os.environ.get("BINANCE_API_SECRET", "").strip()
+        if not key or not secret:
+            raise ValueError(
+                "请在配置文件填写 binance.api_key 和 binance.api_secret，"
+                "或设置 BINANCE_API_KEY 和 BINANCE_API_SECRET"
+            )
+        return key, secret
 
     def require_runtime(self) -> None:
         if self.mode != "live":
@@ -99,8 +126,7 @@ class Settings(ConfigModel):
             raise ValueError("Live mode requires live.enabled=true")
         if not self.trading.binance_underlying_per_qty:
             raise ValueError("Live mode requires verified binance_underlying_per_qty")
-        if not all(os.environ.get(k) for k in ("BINANCE_API_KEY", "BINANCE_API_SECRET")):
-            raise ValueError("Live mode requires BINANCE_API_KEY and BINANCE_API_SECRET")
+        self.binance_credentials()
 
     @model_validator(mode="after")
     def validate_hysteresis(self) -> Self:
@@ -123,8 +149,12 @@ def load_settings(path: Path) -> Settings:
     DecimalLoader.add_constructor(
         "tag:yaml.org,2002:float", lambda loader, node: Decimal(loader.construct_scalar(node))
     )
-    with path.open(encoding="utf-8") as file:
-        data = yaml.load(file, Loader=DecimalLoader) or {}
+    try:
+        with path.open(encoding="utf-8") as file:
+            data = yaml.load(file, Loader=DecimalLoader) or {}
+    except yaml.YAMLError:
+        # YAML parser exceptions include source lines, which may contain credentials.
+        raise ValueError(f"Invalid YAML configuration path={path}; check syntax") from None
     if not isinstance(data, dict):
         raise ValueError(f"Configuration must be a mapping path={path}")
     if "TRADING_MODE" in os.environ:
