@@ -128,6 +128,40 @@ async def trigger(e):
         await e.worker
 
 
+@pytest.mark.parametrize("direction", ["SHORT_BINANCE", "LONG_BINANCE"])
+async def test_live_cancel_uses_resting_price(tmp_path, monkeypatch, direction):
+    async with SQLiteRepository(tmp_path / "live.db") as repo:
+        e = engine(repo, monkeypatch)
+        clock = [1200]
+        monkeypatch.setattr("arbitrage.strategy.live_orders.now_ms", lambda: clock[0])
+        e.binance.fill = D(0)
+        await e.start(900)
+        r = request(direction=direction, entry_threshold="-10", cancel_threshold="-11")
+        await command(e, "create", r)
+        queries = []
+
+        async def moving_book(client_id):
+            queries.append(client_id)
+            clock[0] += 50
+            ts = clock[0]
+            if direction == "SHORT_BINANCE":
+                e.binance_quote, e.mt5_quote = quote("4440", "4441", ts), quote("4430", "4431", ts)
+            else:
+                e.binance_quote, e.mt5_quote = quote("4390", "4391", ts), quote("4400", "4401", ts)
+            if len(queries) >= 3:
+                raise ExecutionUnknown("test deadline: resting order was not canceled")
+            return e.binance.result
+
+        e.binance.order = moving_book
+        await trigger(e)
+        assert len(queries) == 2  # Two observations meet the 50 ms cancellation duration.
+        assert e.binance.canceled == 1
+        assert len(e.binance.sent) == 1
+        assert not e.mt5.sent
+        assert e.conditions[r["request_id"]].state == "DONE"
+        await e.shutdown(clock[0])
+
+
 async def test_live_no_manual_request_never_sends(tmp_path, monkeypatch):
     async with SQLiteRepository(tmp_path / "live.db") as repo:
         e = engine(repo, monkeypatch)

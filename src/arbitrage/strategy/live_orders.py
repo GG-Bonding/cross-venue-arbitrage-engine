@@ -12,7 +12,7 @@ from arbitrage.execution.binance_maker import CancelPolicy
 from arbitrage.execution.live_venues import ExecutionUnknown, OrderRejected
 from arbitrage.observability import now_ms
 from arbitrage.strategy.manual_orders import ManualOrderStrategy
-from arbitrage.strategy.spread import entry_spread
+from arbitrage.strategy.spread import entry_spread, pending_spread
 
 D = Decimal
 END = {"FILLED", "CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"}
@@ -349,10 +349,8 @@ class LiveOrderStrategy(ManualOrderStrategy):
             if self.guard.check(self.binance_quote, self.mt5_quote, now):
                 cancel = True
             else:
-                spread = entry_spread(
-                    c.direction, self.binance_quote, self.mt5_quote, c.entry_threshold
-                )
-                cancel = cancel or policy.update(spread.raw_spread, now, t["created_at_ms"])
+                spread = pending_spread(c.direction, D(t["price"]), self.mt5_quote)
+                cancel = cancel or policy.update(spread, now, t["created_at_ms"])
             if cancel:
                 t["state"] = "CANCEL_INTENT"
                 await self._save(t, "live_cancel_intent")
