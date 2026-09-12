@@ -1,5 +1,50 @@
 # Phase 1 开发记录
 
+## 执行正确性修复（2026-09-12）
+
+开始基线：`6e981ce`（本地 main 与 fetch 后的 origin/main 一致，工作区干净）。
+检查仓库及父目录，未发现适用的 AGENTS.md；遵循现有测试、代码风格和 Git hooks。
+
+### 本次已完成
+
+1. `02d6220` — Live 撤单改用已记录的实际 Maker 挂单价格和最新 MT5 报价，复用
+   `pending_spread()` 后交给原 `CancelPolicy`。SHORT 为挂单卖价减 MT5 ask，LONG 为
+   MT5 bid 减挂单买价。入场算法、报价检查、确认时长、最长挂单时间、人工取消和停止逻辑保留。
+   双向回归先在旧实现下失败（确认时长后仍继续查询），修复后按时撤原单、无重复入场、零成交无对冲。
+   此提交全量 **125 passed**。
+2. `15b073d` — 拆分 `submit_maker()`（LIMIT/GTX/ACK，必填 price）和
+   `submit_market()`（MARKET/RESULT，无 price/timeInForce），仅共用最小 `_submit()`。
+   Maker 入场、市价平仓及裸腿补偿调用已迁移，相关 fake/mock 同步更新。
+   每个意图只发一次 POST；未知结果查询原 client ID，明确拒单仍抛出 OrderRejected。
+   ACK 缺少 status 或 executedQty 时先查询；查询异常或订单不存在后撤原 ID 并核对最终累计成交量。
+   零成交终态不对冲，确认成交只对冲真实数量一次，无法确认进入 REVIEW/SAFE_MODE。
+   首轮新增契约及 ACK 回归 **23 failed**（接口缺失或未查询原 ID），最小实现后全量
+   **145 passed**；补充明确拒单不重试和 Maker 必填价格验证后全量 **148 passed**。
+
+### 实际验证
+
+两项提交前均执行全部 pytest、`ruff check .`、`ruff format --check .`、离线 demo
+和 `git diff --check`，全部通过。最终代码全量 **148 passed**，53 个 Python 文件格式检查通过。
+demo 使用独立的 `data/fix-resting-demo.db`、`data/fix-ack-demo.db`，不读取用户账户配置；
+文档提交复核使用 `data/fix-docs-demo.db`。这些是被忽略的临时验证产物，不进入版本库。
+检查 src/tests 无遗留统一 `submit()` 定义或调用，无不相关修改；未绕过 hooks、禁用测试或 force push。
+本次未连接真实账户执行订单，未进行真实交易验证；离线测试不能证明真实延迟或成交效果。
+ACK 拆分用于明确接口语义，ACK 后可能增加一次查询；未实测，不承诺性能提升幅度，
+也不声称 GTX + RESULT 一定阻塞到成交。
+
+### 后续安排（本次均未实现，按顺序增量验证）
+
+1. 用单调时钟记录条件满足到发单、撤单条件满足到发撤单、本地发现成交到发 MT5 对冲的耗时；
+   离线统计 P50/P95/P99。先建立基线，再决定优化。
+2. 行情唤醒撤单判断，撤单请求不等待慢 REST 查询；保留撤单确认时长、超时检查，
+   并保证每张订单只有一个撤单流程。
+3. 并行独立入场检查，保留发单前最新报价复核；执行期间推迟非必要 MT5 账户及历史查询，
+   保持 MT5 单线程调用约束。
+4. Binance 成交推送驱动处理，REST 作异常补查；覆盖重复、乱序、断流以及推送先于 HTTP 返回。
+5. 结果未知后核对原订单、成交记录和实际持仓；仅确认缺口后补偿，无法确认保持 REVIEW，不能盲目重试。
+
+本次没有增加手续费模型、重构策略体系、引入通用执行框架，也没有实现用户数据流或自动恢复。
+
 按用户附件的分阶段要求完成，不提前启用实盘。
 
 1. 新增双向 Spread、pending spread、连续确认、Quote 边界测试，首次 pytest 因 domain 尚未实现失败；实现最小模块后 **14 passed**。

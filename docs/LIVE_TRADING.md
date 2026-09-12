@@ -36,6 +36,25 @@ MT5 手数 = Binance 实际成交量 × 已核实的标的乘数 / MT5 合约大
 
 ## 成交与失败
 
+### Maker ACK 与 Market RESULT
+
+- Maker 入场调用 `submit_maker(..., price=...)`，发送 LIMIT、GTX、newOrderRespType=ACK，
+  price 必填。ACK 只代表接单，不代表成交；缺少 status 或 executedQty 时查询原 client ID，
+  不把缺失字段默认为 FILLED 或已成交数量。
+- 市价平仓及裸腿补偿调用 `submit_market(...)`，发送 MARKET、newOrderRespType=RESULT，
+  不携带 price 或 timeInForce。仍验证真实状态和累计成交数量，RESULT 也不能替代结果核对。
+- 每个下单意图只发送一次 POST。超时或结果未知后查询原 client ID，不重新提交原订单。
+  ACK 后查询失败（包括订单不存在）进入原 ID 撤单及最终成交量核对流程；
+  撤单与成交竞争时以最终实际累计成交量决定对冲数量，无法确认保持 REVIEW/SAFE_MODE。
+
+Maker 挂单期间撤单点差使用已记录的实际挂单价格：SHORT 为挂单卖价 − MT5 ask，
+LONG 为 MT5 bid − 挂单买价。最新 Binance 盘口不改变已挂订单的价格。
+仍使用原有报价有效性检查、撤单确认时长、超时、人工取消和停止行为。
+
+ACK 拆分明确接口语义，可能额外增加一次查询；未实测下单延迟，不承诺性能提升，
+不声称 GTX + RESULT 一定阻塞到成交。后续耗时测量、行情唤醒撤单、并行检查、用户数据流及
+未知结果恢复计划见 [DEVELOPMENT.md](DEVELOPMENT.md)，均不属于本次实现。
+
 1. 先持久化执行意图及唯一 Binance client order ID，再向平台提交一次。
 2. 使用 REST 查询累计成交；首次部分成交立即撤销剩余量，并查询最终状态，处理撤单与成交竞争。
 3. 按最终实际成交量精确对冲 MT5。成交量不能表示为 MT5 手数、或 MT5 下单前检查明确拒绝，
