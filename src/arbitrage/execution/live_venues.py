@@ -56,12 +56,15 @@ class BinanceTrading:
             # Do not include aiohttp URL exceptions: signed URLs contain credentials.
             raise ExecutionUnknown("Binance transport failed; query client order ID") from None
 
-    async def initialize(self):
+    async def sync_clock(self):
         url = self.settings.market.binance_rest_url.rstrip("/") + "/fapi/v1/time"
         async with self.session.get(url, proxy=self.settings.market.binance_proxy_url) as res:
             if res.status != 200:
                 raise RuntimeError("Binance clock unavailable")
             self.offset = int((await res.json())["serverTime"]) - now_ms()
+
+    async def initialize(self):
+        await self.sync_clock()
         mode = await self.request("GET", "/fapi/v1/positionSide/dual")
         if mode.get("dualSidePosition") is not True:
             raise ValueError("实盘要求 Binance 双向持仓模式，请在平台设置后重启")

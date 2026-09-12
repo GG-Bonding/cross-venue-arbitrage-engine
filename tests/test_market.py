@@ -10,7 +10,7 @@ from test_execution import spec
 from arbitrage.config import Settings
 from arbitrage.market.binance_market import parse_book_ticker, parse_exchange_info
 from arbitrage.market.mt5_market import MT5Market
-from arbitrage.market.runtime import consume_quotes
+from arbitrage.market.runtime import consume_quotes, read_paper_accounts
 from arbitrage.persistence.sqlite_repository import SQLiteRepository
 from arbitrage.strategy.arbitrage_strategy import ArbitrageStrategy
 
@@ -253,3 +253,38 @@ async def test_consumer_watchdog_runs_when_queue_is_silent(tmp_path, monkeypatch
             stop.set()
             await task
         assert engine.order.state == "CANCELING"
+
+
+async def test_paper_account_reader_includes_both_venues_and_isolates_failures():
+    engine = SimpleNamespace(accounts={})
+    stop = asyncio.Event()
+
+    async def binance():
+        return {"currency": "USDT", "equity": "100", "available": "90", "profit": "1"}
+
+    async def mt5():
+        stop.set()
+        return {"currency": "USD", "equity": "200", "available": "180", "profit": "2"}
+
+    await read_paper_accounts(engine, {"mt5": mt5, "binance": binance}, stop, interval=0.01)
+    assert set(engine.accounts) == {"binance", "mt5"}
+    assert engine.accounts_error is None
+
+    engine = SimpleNamespace(accounts={"binance": {"equity": "100"}})
+    stop = asyncio.Event()
+
+    async def unavailable():
+        raise RuntimeError("temporarily unavailable")
+
+    async def stop_after_mt5():
+        stop.set()
+        return {"equity": "200"}
+
+    await read_paper_accounts(
+        engine,
+        {"binance": unavailable, "mt5": stop_after_mt5},
+        stop,
+        interval=0.01,
+    )
+    assert engine.accounts == {"binance": {"equity": "100"}, "mt5": {"equity": "200"}}
+    assert engine.accounts_error == "binance: RuntimeError: temporarily unavailable"

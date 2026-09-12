@@ -11,19 +11,25 @@ from arbitrage.persistence.sqlite_repository import SQLiteRepository
 from arbitrage.strategy.manual_orders import ManualOrderStrategy
 
 
-async def read_paper_account(engine, mt5, stop):
-    from arbitrage.execution.live_venues import MT5Trading
-
-    reader = MT5Trading(mt5)
+async def read_paper_accounts(engine, readers, stop, *, fixed_errors=None, interval=5):
+    fixed_errors = fixed_errors or {}
     while not stop.is_set():
-        try:
-            engine.accounts = {"mt5": await reader.account()}
-            engine.accounts_error = None
-        except Exception as exc:
-            engine.accounts_error = str(exc)
+        names = list(readers)
+        results = await asyncio.gather(*(readers[name]() for name in names), return_exceptions=True)
+        accounts = dict(getattr(engine, "accounts", {}))
+        errors = dict(fixed_errors)
+        for name, result in zip(names, results, strict=True):
+            if isinstance(result, Exception):
+                errors[name] = f"{type(result).__name__}: {result}"
+            else:
+                accounts[name] = result
+        engine.accounts = accounts
+        engine.accounts_error = (
+            " | ".join(f"{name}: {error}" for name, error in errors.items()) or None
+        )
         engine.accounts_updated_ms = now_ms()
         try:
-            await asyncio.wait_for(stop.wait(), 3)
+            await asyncio.wait_for(stop.wait(), interval)
         except TimeoutError:
             pass
 
@@ -85,8 +91,31 @@ async def _run_market(settings, *, duration, stop, on_engine) -> None:
                 settings, spec, repo, BinanceTrading(settings, session), MT5Trading(mt5), mt5.spec
             )
         else:
+            from arbitrage.execution.live_venues import BinanceTrading, MT5Trading
+
             await repo.bind_mode("paper")
             engine = ManualOrderStrategy(settings, spec, repo)
+            paper_readers = {"mt5": MT5Trading(mt5).account}
+            paper_account_errors = {}
+            try:
+                binance_account = BinanceTrading(settings, session)
+            except ValueError as exc:
+                paper_account_errors["binance"] = str(exc)
+            else:
+                binance_clock_ready = False
+
+                async def read_binance_account():
+                    nonlocal binance_clock_ready
+                    try:
+                        if not binance_clock_ready:
+                            await binance_account.sync_clock()
+                            binance_clock_ready = True
+                        return await binance_account.account()
+                    except Exception:
+                        binance_clock_ready = False
+                        raise
+
+                paper_readers["binance"] = read_binance_account
         await engine.start(now_ms())
         if on_engine is not None:
             on_engine(engine)
@@ -101,7 +130,16 @@ async def _run_market(settings, *, duration, stop, on_engine) -> None:
                     group.create_task(consume_quotes(engine, queue, stop)),
                 ]
                 if settings.mode == "paper":
-                    tasks.append(group.create_task(read_paper_account(engine, mt5, stop)))
+                    tasks.append(
+                        group.create_task(
+                            read_paper_accounts(
+                                engine,
+                                paper_readers,
+                                stop,
+                                fixed_errors=paper_account_errors,
+                            )
+                        )
+                    )
                 await stop.wait()
                 for task in tasks:
                     task.cancel()
