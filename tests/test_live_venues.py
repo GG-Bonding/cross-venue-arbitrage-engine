@@ -12,7 +12,47 @@ from arbitrage.execution.live_venues import (
     ExecutionUnknown,
     MT5Trading,
     OrderRejected,
+    PostOnlyWouldMatch,
 )
+
+
+@pytest.mark.parametrize(
+    "code,maker,expected",
+    [
+        (-5022, True, PostOnlyWouldMatch),
+        (-2019, True, OrderRejected),
+        (-5022, False, OrderRejected),
+    ],
+)
+async def test_exact_post_only_error_mapping(code, maker, expected):
+    class Response:
+        status = 400
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            pass
+
+        async def json(self):
+            return dict(code=code, msg="not used for error classification")
+
+    class Session:
+        calls = 0
+
+        def request(self, *args, **kwargs):
+            self.calls += 1
+            return Response()
+
+    session = Session()
+    adapter = BinanceTrading(Settings(), session, key="test", secret="test")
+    with pytest.raises(expected) as error:
+        if maker:
+            await adapter.submit_maker("id", "SELL", "SHORT", D(1), price=D(4400))
+        else:
+            await adapter.submit_market("id", "BUY", "SHORT", D(1))
+    assert type(error.value) is expected
+    assert session.calls == 1
 
 
 async def test_binance_post_only_and_close_position_side():

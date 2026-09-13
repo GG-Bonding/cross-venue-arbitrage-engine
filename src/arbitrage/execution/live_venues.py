@@ -21,6 +21,10 @@ class OrderRejected(RuntimeError):
     """A definitive exchange rejection; no execution occurred."""
 
 
+class PostOnlyWouldMatch(OrderRejected):
+    """Explicit -5022 response to this LIMIT GTX POST: no order was accepted."""
+
+
 class BinanceTrading:
     def __init__(self, settings, session, *, key=None, secret=None):
         self.settings, self.session = settings, session
@@ -55,6 +59,8 @@ class BinanceTrading:
                     # 5xx / timeout responses can conceal an accepted order.
                     if response.status >= 500 or code in {-1006, -1007}:
                         raise ExecutionUnknown(f"Binance uncertain response code={code}")
+                    if code == -5022 and method == "POST" and params.get("timeInForce") == "GTX":
+                        raise PostOnlyWouldMatch("Binance post-only would match (-5022)")
                     raise OrderRejected(f"Binance rejected code={code}")
                 return data
         except (TimeoutError, aiohttp.ClientError, ValueError):
@@ -284,7 +290,8 @@ class MT5Trading:
             if (
                 p.symbol != self.settings.symbol.mt5
                 or p.magic != self.settings.live.mt5_magic
-                or D(str(p.volume)) != lots
+                or lots <= 0
+                or D(str(p.volume)) < lots
                 or (p.type == self.api.POSITION_TYPE_BUY) == buy
             ):
                 raise ExecutionUnknown("MT5 close position mismatch")
