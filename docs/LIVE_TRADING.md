@@ -12,8 +12,9 @@
 
 实盘显示两账户权益、可用资金、浮盈、更新时间，以及双边持仓和逐笔平仓。
 「一键平仓」只排队关闭点击时本系统已记录的 OPEN 持仓；不操作外部持仓。
-平仓与开仓共用一个执行槽，平仓队列优先。可同时持有多个已开仓交易对，
-但任何时刻最多只有一笔开仓、对冲或平仓操作在执行。
+平仓与开仓共用一个执行槽，平仓队列优先。V1 的 live.max_open_pairs 固定为 1；已有 Pair 时其余条件等待。
+旧库若有多个已知 OPEN 仍可串行平仓，但不新增 Pair。一次只处理一个 Pair 的执行，
+其 Binance 撤单与 MT5 增量对冲可以重叠，MT5 自身仍单线程。
 
 ## 条件和数量
 
@@ -21,13 +22,13 @@
 
 | 方向 | 入场信号价差 | 平仓可执行价差 |
 | --- | --- | --- |
-| A：空 Binance / 多 MT5 | Binance Ask − MT5 Ask | Binance Ask − MT5 Bid |
-| B：多 Binance / 空 MT5 | MT5 Bid − Binance Bid | MT5 Ask − Binance Bid |
+| A：空 Binance / 多 MT5 | Binance Ask − MT5 Ask | Binance Buy Maker Bid − MT5 Bid |
+| B：多 Binance / 空 MT5 | MT5 Bid − Binance Bid | MT5 Ask − Binance Sell Maker Ask |
 
 入场价差 >= 本单入场阈值，通过有效行情与连续确认后提交 Binance GTX Post-only 限价单。
 开仓成交不保证最终价差与信号相同：MT5 对冲有执行延迟和滑点。
 平仓目标留空时逐笔手动平仓；填写时，可执行平仓价差 <= 目标并通过连续确认后排队平仓。
-平仓目标是交易请求触发条件，不能保证市场单最终成交价差。
+Maker 平仓价格按 tick 对齐。平仓阈值只控制触发/撤单，MT5 实际成交仍可能滑点。
 
 MT5 手数 = Binance 实际成交量 × 已核实的标的乘数 / MT5 合约大小。
 必须完全符合 Broker 最小手数和步长；不通过四舍五入制造敞口。
@@ -56,7 +57,7 @@ Live 使用私有订单推送；重复/乱序不重复对冲，健康流每秒 R
 - Maker 入场调用 `submit_maker(..., price=...)`，发送 LIMIT、GTX、newOrderRespType=ACK，
   price 必填。ACK 只代表接单，不代表成交；缺少 status 或 executedQty 时查询原 client ID，
   不把缺失字段默认为 FILLED 或已成交数量。
-- 市价平仓及裸腿补偿调用 `submit_market(...)`，发送 MARKET、newOrderRespType=RESULT，
+- 风险补偿调用 `submit_market(...)`，发送 MARKET、newOrderRespType=RESULT，
   不携带 price 或 timeInForce。仍验证真实状态和累计成交数量，RESULT 也不能替代结果核对。
 - 每个下单意图只发送一次 POST。超时或结果未知后查询原 client ID，不重新提交原订单。
   ACK 后查询失败（包括订单不存在）进入原 ID 撤单及最终成交量核对流程；
@@ -70,15 +71,24 @@ ACK 拆分明确接口语义，可能额外增加一次查询；未实测下单�
 不声称 GTX + RESULT 一定阻塞到成交。后续耗时测量、行情唤醒撤单、并行检查、用户数据流及
 未知结果恢复的当前实现及边界见 [DEVELOPMENT.md](DEVELOPMENT.md)。
 
-1. 先持久化执行意图及唯一 Binance client order ID，再向平台提交一次。
-2. 使用订单推送与 REST 补查确认累计成交；首次部分成交立即撤销剩余量，并查询最终状态，处理撤单与成交竞争。
-3. 按最终实际成交量精确对冲 MT5。成交量不能表示为 MT5 手数、或 MT5 下单前检查明确拒绝，
-   则用反方向平仓指令平掉 Binance 实际成交量，并将本次标记失败。
-4. HTTP 超时不能视为拒单：查询原 client ID，必要时撤销同一 ID，绝不重新提交入场。
-   MT5 下单后超时、无回报或部分成交进入 REVIEW，禁止盲目重发或猜测敞口。
-5. 逐笔平仓先关 Binance 对应方向的记录数量，再按 MT5 position ticket 平仓。
-   任一腿结果不明会进入 SAFE_MODE，禁止后续交易。
-6. 循环单在本轮未成交撤销，或完整平仓后重新排到队尾；失败/待核对不循环。
+1. 意图和唯一 Binance client ID 先落盘，每个下单意图最多发送一次 POST。
+2. Maker 累计成交增加时，按 cumulative_filled − processed_filled 计算未处理量。
+   可表示为 MT5 最小手数/步长的增量立即对冲，同时撤 Binance 剩余单，不等撤单终态才开始对冲。
+   撤单期间的新成交推送可继续触发增量；重复推送不重发。最后核对累计量不能倒退。
+3. 每次 MT5 发送前记录唯一 tag 和 INTENT；成功回报且 ticket 持仓核对后才推进 processed_filled。
+   一笔 Pair 可以对应多张 mt5_legs，记录每张 lots、closed_lots、ticket、identifier。
+   下单结果未知保留 REVIEW/SAFE_MODE，不将未知量当成已对冲或未成交，不自动重发。
+4. 开仓终态存在不可精确对冲的剩余量，只用 Market 平掉该剩余；保留已对冲配对量。
+   不到 MT5 最小单位时不会勉强下单。若 Binance 剩余量也不符合过滤器或补偿结果不明，保持 REVIEW。
+5. 正常平仓为反方向 LIMIT/GTX/ACK，累计成交驱动 MT5 ticket 增量关闭。
+   平仓未成交或只完成部分时保留 OPEN，下一次自动触发重新连续确认；手动平仓需再次点击。
+   撤单检查使用该张 Close Maker 的固定价格和 MT5 对手价，保留报价/时间/停止检查。
+   平仓碎片无法精确关闭 MT5，或 MT5 下单前明确拒绝时，仅恢复 Binance 已确认、尚未关闭 MT5 的数量。
+   MT5 结果未知时禁止这种恢复，以免反向制造敞口。
+6. 明确 LIMIT GTX POST 返回 -5022 映射 PostOnlyWouldMatch，表示本次零成交拒单。
+   入场回 WAITING、重置确认、下次新机会生成新 ID；普通拒单及未知结果不走此路径。
+   不通过“查询不到订单”推断零成交。
+7. 循环仍只在未成交撤销或完整平仓后排队；失败/REVIEW 不循环。
 
 停止会话会停止新入场，等待当前执行完成必要撤单/对冲。
 **停止监控不自动平掉已开的双边持仓**；停止后平仓目标不再监控。
@@ -100,7 +110,22 @@ OPEN 列表报价估算收益点差 = 实际开仓点差 − 最新可平仓点�
 FAILED 补偿同样收集 Binance 开/平成交并进入 settlement_totals；不只统计成功交易。
 汇总按币种显示完整结算，未结算有成交尝试单列，不计作零收益；USD 与 USDT 不直接相加。
 Binance 资金费尚未分摊到单笔交易，不将未取得的费用写成零。
-当前未实现按合并净利润自动平仓、外部持仓导入、补仓、强平价计算或多交易对账户管理。
+未实现自动账户费率/资金费归集、外部持仓导入、通用恢复、强平价或多交易对账户管理。
+
+### 可选预计净利润平仓
+
+条件单新增 min_net_profit（页面“预计净利润 ≥”），可以与 exit_threshold 同时填写；
+同时填写时必须同时满足。固定点差模式保留。发单前及挂单期间重新检查。
+费用先使用 live.profit_budget 的整笔预算：open_fees、close_fees（双平台合计）、funding、swap。
+四项均要明确填写，quote_units_aligned=true 表示操作者已确认两腿计价单位及换算。
+默认 null/false 表示未知，不是零：净利润条件不会触发。配置参考 config/live.example.yaml。
+这些是人工预算，不是自动查询到账户费率；预算不能保证覆盖之后的资金费或滑点。
+
+预计净利润 = 已取得的成交现金流 + 剩余配对按 Close Maker/当前 MT5 对手价退出的估算 − 整笔费用预算。
+未发生部分平仓/补偿时等价于 配对标的数量 ×（实际入场点差 − 当前 Maker 退出点差）− 预算。
+部分平仓、补偿及多个 MT5 ticket 的已知现金流全部归入原 Pair，不只统计成功部分。
+缺少真实价格/旧库必要字段时估算留空；实际结算仍单独按币种展示，不以预算冒充已实现净收益。
+停止监控仍不自动平持仓；本轮没有新增强制 Market 平仓按钮或自动恢复。
 
 ## 本地配置与启动
 

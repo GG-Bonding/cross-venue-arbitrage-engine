@@ -174,7 +174,8 @@ docs/                    API 核对与开发验证记录
 
 实盘实现位于 execution/live_venues.py 与 strategy/live_orders.py，使用独立配置及数据库。
 后续仍需真实账户联调、用户数据流、资金费归属、币种换算和不确定执行的恢复工具。
-当前平仓使用市场单，不是 Maker 平仓；不得把接口测试作为收益或实盘稳定性证明。
+正常开/平仓均使用 Binance Maker，成交驱动 MT5 增量处理；Market 仅用于已确认敞口补偿。
+V1 限制一笔 OPEN Pair；预计净利润模式需要明确配置费用预算。不得把离线测试作为收益或实盘稳定性证明。
 
 官方接口核对链接见 [docs/API_NOTES.md](docs/API_NOTES.md)，测试先行记录见
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。GitHub Actions 在 Linux Python 3.12 和 Windows

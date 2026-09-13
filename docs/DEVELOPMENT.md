@@ -1,5 +1,44 @@
 # Phase 1 开发记录
 
+## 成交驱动与 Maker 退出（2026-09-13）
+
+基线 `892a1c4b02196e12b06f4c7727c4595a2cd6bed4`，fetch 后本地和 origin/main 一致，开始工作区干净。
+用户最新六项指导中 PendingSpread 与实际成交 Basis 已存在，仅保留回归。
+本轮新增增量 MT5 对冲、Maker 退出、预计净利润预算、单 Pair 限制及 -5022 分类。
+
+代码提交：`8baf2a8`（交易端契约）、`7b13f5d`（预算与单 Pair 配置）、
+`b7b75cb`（增量执行、Maker 退出及界面）。
+
+- `hedge_ledger.py` 维护累计成交、已处理增量、MT5 tickets 和持久化的发送意图。
+  Binance 撤单与 MT5 增量处理重叠；零成交/重复更新不对冲，确认数量倒退/结果未知进入 REVIEW。
+  可表示部分先配对，开仓终态只补偿残余；正常退出只平剩余配对量。
+- 正常退出用 GTX/ACK，固定退出价格和 MT5 对手价决定撤单；部分退出保留 OPEN。
+  MT5 明确下单前拒绝可恢复已确认的 Binance 未配平退出量；未知结果不盲目补单。
+  多 ticket 的平仓、持仓核对和成交结算逐张检查，兼容旧单 ticket 记录。
+- max_open_pairs 固定 1，不新增多 Pair。旧库多 OPEN 仍允许退出；旧多 Pair 平仓测试只替换
+  入场准入边界以验证迁移的串行退出，不放宽生产配置。
+- -5022 仅分类明确的 GTX POST 拒单，确认重置后回等待；普通拒单/网络不确定不重试。
+- 新增 min_net_profit 与 live.profit_budget，预算或计价确认缺失时不触发净利润条件。
+  费用方式询问未收到答复，按已说明的默认采用人工整笔预算，未自动读取账户费率。
+  实际净结算与预计预算分开；新增现金流口径包含所有部分退出与风险补偿。
+
+测试先复现没有单 Pair 限制、对冲等待撤单以及退出仍走 Market 的失败；
+增量测试首次配置构造使用冻结对象赋值，改为 model_copy 后确认实际等待撤单失败。
+旧“市场平仓价差”和“多 Pair 入场”用例按本轮新契约调整，未禁用测试。
+最终全量 **188 passed**，`ruff check .`、`ruff format --check .`、`git diff --check` 通过。
+独立 `data/demo-maker-increments-20260913.db` 离线 demo 完成挂单→撤单→IDLE；
+前端 console.js 通过 V8 语法解析。未进行浏览器交互验收。
+无遗留统一 `.submit()` 调用，正常退出不调用 Market。
+未启动真实账户交易、未重启现有会话，不承诺收益、成交率或延迟提升。
+
+仍未实现：真实账户费用/资金费自动归集、Maker 持续追价、通用恢复、多 Pair 虚拟分配账本。
+HTTP 下单响应仍需完成后进入本地执行循环；不声称已消除所有网络等待。
+V1 不保证最大裸露时间；MT5 最小手数和 Binance 过滤器不能被程序绕过。
+
+接口依据：[Binance 官方变更记录中的 -5022 / fapi 说明](https://developers.binance.com/zh-CN/docs/products/derivatives-trading-coin-futures/change-log)。
+
+以下记录为历史范围，和本节不一致时以本节为准。
+
 ## 兑现点差优先（2026-09-13，基线 3acb08d）
 
 本地 main 与 fetch 后 origin/main 均为 `3acb08db023f175c59aa6f5143e0433a5e1b76e8`。
