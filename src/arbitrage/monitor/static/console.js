@@ -37,11 +37,11 @@ $("start").onclick=()=>command("/api/start");$("stop").onclick=()=>command("/api
 $("close-all").onclick=()=>command("/api/close-all");
 $("form").onsubmit=async e=>{
  e.preventDefault();if($("create").disabled)return;
- const fields={direction:$("direction").value,entry_threshold:$("entry").value,cancel_threshold:$("cancel").value,quantity:$("quantity").value,repeat:$("repeat").checked,exit_threshold:current.mode==="live"?$("exit").value||null:null};
+ const fields={direction:$("direction").value,entry_threshold:$("entry").value,cancel_threshold:$("cancel").value,quantity:$("quantity").value,repeat:$("repeat").checked,exit_threshold:current.mode==="live"?$("exit").value||null:null,min_net_profit:current.mode==="live"?$("net-profit").value||null:null};
  const signature=JSON.stringify(fields);if(draft?.signature!==signature)draft={signature,id:crypto.randomUUID()};
  if(await command("/api/conditions",{...fields,request_id:draft.id}))draft=null;
 };
-function copy(c){$("direction").value=c.direction;$("entry").value=c.entry_threshold;$("cancel").value=c.cancel_threshold;$("quantity").value=c.quantity;$("repeat").checked=c.repeat;$("exit").value=c.exit_threshold??"";draft=null;$("entry").focus();}
+function copy(c){$("direction").value=c.direction;$("entry").value=c.entry_threshold;$("cancel").value=c.cancel_threshold;$("quantity").value=c.quantity;$("repeat").checked=c.repeat;$("exit").value=c.exit_threshold??"";$("net-profit").value=c.min_net_profit??"";draft=null;$("entry").focus();}
 function render(s){
  if(s.config)config=s.config;if(!config)throw Error("状态响应缺少配置");
  const c=config;current={...s,config};token=s.control_token;online=true;
@@ -58,15 +58,15 @@ function render(s){
  text($("slot"),s.active_condition_id?"执行中："+s.active_condition_id.slice(0,8)+" · 其余单等待":"执行槽空闲");
  text($("risk"),s.error||"");
  if(!initialized){$("entry").value=c.entry_threshold;$("cancel").value=c.cancel_threshold;$("quantity").value=c.binance_qty;initialized=true;}
- $("exit").disabled=s.mode!=="live";
+ $("exit").disabled=s.mode!=="live";$("net-profit").disabled=s.mode!=="live";
  const visible=s.conditions.filter(c=>$("finished").checked||!["DONE","CANCELED","FAILED"].includes(c.state)),ids=new Set(visible.map(c=>c.request_id));
  for(const [id,row] of rows)if(!ids.has(id)){row.remove();rows.delete(id);}
  for(const [index,c] of visible.entries()){
   let row=rows.get(c.request_id);
   if(!row){row=document.createElement("tr");for(let i=0;i<11;i++)row.insertCell();row.dataset.id=c.request_id;rows.set(c.request_id,row);}
   row.condition=c;
-  const values=[c.request_id.slice(0,8)+" / "+c.queue_seq,c.direction==="SHORT_BINANCE"?"A 空 Binance / 多 MT5":"B 多 Binance / 空 MT5",(c.raw_spread??"—")+" / "+(c.edge??"—"),c.entry_threshold,c.cancel_threshold,c.exit_threshold??"手动",c.quantity,c.repeat?"循环":"单次",(stateNames[c.state]||c.state)+(c.close_requested?" · 平仓排队":"")+(c.state==="WAITING"?" · "+c.confirmation.count+"/"+config.min_ticks+" Tick · "+c.confirmation.duration_ms+"/"+config.min_duration_ms+" ms":"")];
-  values.push("实入 "+(c.actual_entry_spread??"—")+" / 实出 "+(c.actual_exit_spread??"—")+" / 报价估算收益点差 "+(c.estimated_spread_gain??"—"));
+  const values=[c.request_id.slice(0,8)+" / "+c.queue_seq,c.direction==="SHORT_BINANCE"?"A 空 Binance / 多 MT5":"B 多 Binance / 空 MT5",(c.raw_spread??"—")+" / "+(c.edge??"—"),c.entry_threshold,c.cancel_threshold,(c.exit_threshold??"—")+" / 净≥ "+(c.min_net_profit??"—"),c.quantity,c.repeat?"循环":"单次",(stateNames[c.state]||c.state)+(c.close_requested?" · 平仓排队":"")+(c.state==="WAITING"?" · "+c.confirmation.count+"/"+config.min_ticks+" Tick · "+c.confirmation.duration_ms+"/"+config.min_duration_ms+" ms":"")];
+  values.push("实入 "+(c.actual_entry_spread??"—")+" / 实出 "+(c.actual_exit_spread??"—")+" / 报价估算收益点差 "+(c.estimated_spread_gain??"—")+" / 预计净 "+(c.profit_estimate?.expected_net_pnl??"未知"));
   values.forEach((v,i)=>text(row.cells[i],v));
   const actions=c.state==="WAITING"?["pause","cancel"]:c.state==="PAUSED"?["resume","cancel"]:c.state==="OPEN"?["close"]:["EXECUTING","CANCELING"].includes(c.state)?["cancel"]:[];
   const signature=actions.join();

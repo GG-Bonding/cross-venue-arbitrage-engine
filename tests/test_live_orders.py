@@ -76,6 +76,8 @@ async def test_actual_spreads_and_compensation_settlement(tmp_path, monkeypatch)
 async def test_confirmed_exit_cancels_pending_entry_before_closing(tmp_path, monkeypatch, outcome):
     async with SQLiteRepository(tmp_path / "priority.db") as repo:
         e = engine(repo, monkeypatch)
+        # Legacy multi-pair execution fixture: isolate exit scheduling from new V1 admission.
+        monkeypatch.setattr(e, "_entry_capacity", lambda: True)
         await e.start(900)
         r = request()
         await command(e, "create", r)
@@ -86,7 +88,11 @@ async def test_confirmed_exit_cancels_pending_entry_before_closing(tmp_path, mon
         waiting = asyncio.Event()
         ids = []
 
+        original_maker = e.binance.submit_maker
+
         async def maker(client, side, position_side, quantity, *, price):
+            if side == "BUY":
+                return await original_maker(client, side, position_side, quantity, price=price)
             ids.append(client)
             e.binance.sent.append((side, position_side, quantity, price))
             return {"orderId": 2}  # Initial ACK query is deliberately slow.
@@ -172,7 +178,8 @@ class Binance:
         if self.error:
             raise self.error
         filled = self.fill if price is not None else quantity
-        self.amounts[position_side] += filled if price is not None else -filled
+        opening = (side == "SELL") == (position_side == "SHORT")
+        self.amounts[position_side] += filled if opening else -filled
         self.result = dict(
             status="FILLED" if filled == quantity else "PARTIALLY_FILLED",
             executedQty=str(filled),
@@ -217,7 +224,10 @@ class MT5:
         if self.error:
             raise self.error
         if ticket:
-            self.rows = [p for p in self.rows if p["ticket"] != ticket]
+            for p in self.rows:
+                if p["ticket"] == ticket:
+                    p["volume"] = str(D(p["volume"]) - lots)
+            self.rows = [p for p in self.rows if D(p["volume"]) > 0]
             order = ticket
         else:
             order = 100 + len(self.sent)
@@ -646,6 +656,8 @@ async def test_paper_database_cannot_be_reused_for_live(tmp_path):
 async def test_bulk_close_runs_serially_and_repeat_requeues_after_close(tmp_path, monkeypatch):
     async with SQLiteRepository(tmp_path / "live.db") as repo:
         e = engine(repo, monkeypatch)
+        # Existing multiple OPEN records can still be closed serially after migration.
+        monkeypatch.setattr(e, "_entry_capacity", lambda: True)
         await e.start(900)
         a, b = request(repeat=True), request()
         await command(e, "create", a)
@@ -666,15 +678,15 @@ async def test_bulk_close_runs_serially_and_repeat_requeues_after_close(tmp_path
         await e.shutdown(1400)
 
 
-async def test_conditional_exit_uses_crossed_quotes_and_rechecks_before_send(tmp_path, monkeypatch):
+async def test_conditional_exit_uses_maker_quotes_and_rechecks_before_send(tmp_path, monkeypatch):
     async with SQLiteRepository(tmp_path / "live.db") as repo:
         e = engine(repo, monkeypatch)
         await e.start(900)
-        r = request(exit_threshold="4.40")
+        r = request(exit_threshold="4.39")
         await command(e, "create", r)
         await trigger(e)
         c = e.conditions[r["request_id"]]
-        # Entry maker spread 4.36 is below 4.40, but crossed exit spread 4.48 is not.
+        # Entry basis 4.36 passes, but closing BUY maker bid - MT5 bid = 4.40 does not.
         await trigger(e)
         assert c.state == "OPEN" and not c.close_requested
         c.exit_threshold = D("5")

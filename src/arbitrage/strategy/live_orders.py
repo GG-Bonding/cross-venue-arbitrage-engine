@@ -10,12 +10,13 @@ from arbitrage.domain.conditional_order import ConditionalOrder, ConditionalRequ
 from arbitrage.domain.enums import StrategyState
 from arbitrage.domain.specs import HedgeCalculator, round_step
 from arbitrage.execution.binance_maker import CancelPolicy
-from arbitrage.execution.live_venues import ExecutionUnknown, OrderRejected
+from arbitrage.execution.live_venues import ExecutionUnknown, OrderRejected, PostOnlyWouldMatch
 from arbitrage.execution.user_stream import OrderUpdates
 from arbitrage.observability import now_ms
+from arbitrage.strategy.hedge_ledger import legs, remaining
 from arbitrage.strategy.manual_orders import ManualOrderStrategy
 from arbitrage.strategy.spread import entry_spread, pending_spread
-from arbitrage.strategy.trade_metrics import update_metrics
+from arbitrage.strategy.trade_metrics import expected_net_pnl, update_metrics
 
 D = Decimal
 END = {"FILLED", "CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"}
@@ -59,6 +60,14 @@ class LiveOrderStrategy(ManualOrderStrategy):
         for key, confirmation in self.condition_confirmations.items():
             if not key.startswith("exit:"):
                 confirmation.reset()
+
+    def _entry_capacity(self):
+        return not any(t["state"] == "OPEN" for t in self.trades.values())
+
+    def _close_cost(self, sell):
+        b, m = self.binance_quote, self.mt5_quote
+        price = round_step(b.bid if sell else b.ask, self.maker.spec.tick_size, up=not sell)
+        return price - m.bid if sell else m.ask - price
 
     def _close_queued(self):
         return any(c.state == "OPEN" and c.close_requested for c in self.conditions.values())
@@ -133,14 +142,20 @@ class LiveOrderStrategy(ManualOrderStrategy):
                 raise ExecutionUnknown("存在中断交易，请在两平台核对后处理恢复记录")
             if t["state"] != "OPEN":
                 continue
-            expected[t["position_side"]] += D(t["filled_qty"])
-            matches = [p for p in positions if p["ticket"] == t["mt5_ticket"]]
-            if len(matches) != 1 or D(matches[0]["volume"]) != D(t["lots"]):
-                raise ExecutionUnknown("MT5 已记录持仓与账户不一致")
-            p = matches[0]
-            if p["magic"] != self.settings.live.mt5_magic or p["type"] != (0 if t["sell"] else 1):
-                raise ExecutionUnknown("MT5 持仓方向或归属不一致")
-            owned.add(p["ticket"])
+            expected[t["position_side"]] += remaining(t)
+            for leg in legs(t):
+                volume = D(leg["lots"]) - D(leg["closed_lots"])
+                if not volume:
+                    continue
+                matches = [p for p in positions if p["ticket"] == leg["ticket"]]
+                if len(matches) != 1 or D(matches[0]["volume"]) != volume:
+                    raise ExecutionUnknown("MT5 recorded ticket volume mismatch")
+                p = matches[0]
+                if p["magic"] != self.settings.live.mt5_magic or p["type"] != (
+                    0 if t["sell"] else 1
+                ):
+                    raise ExecutionUnknown("MT5 ticket ownership mismatch")
+                owned.add(p["ticket"])
         if any(p["ticket"] not in owned for p in positions):
             raise ExecutionUnknown("MT5 本品种存在外部持仓；请使用独立账户或品种")
         actual = {"LONG": D(0), "SHORT": D(0)}
@@ -234,20 +249,24 @@ class LiveOrderStrategy(ManualOrderStrategy):
         if self.guard.check(binance, mt5, now) or not changed:
             return {}
         for c in sorted(self.conditions.values(), key=lambda c: c.queue_seq):
-            if c.state == "OPEN" and c.exit_threshold is not None and not c.close_requested:
-                cost = (
-                    binance.ask - mt5.bid
-                    if c.direction == "SHORT_BINANCE"
-                    else mt5.ask - binance.bid
-                )
+            if (
+                c.state == "OPEN"
+                and (c.exit_threshold is not None or c.min_net_profit is not None)
+                and not c.close_requested
+            ):
+                cost = self._close_cost(c.direction == "SHORT_BINANCE")
                 if (
                     self._confirmation("exit:" + c.request_id)
-                    .update(c.exit_threshold - cost, now)
+                    .update(self._exit_edge(c, self.trades[c.execution_order_id], cost), now)
                     .state
                     == "CONFIRMED"
                 ):
                     await self._apply_command("close_threshold", c.request_id, now)
-        if self._close_queued() or (self.worker and not self.worker.done()):
+        if (
+            self._close_queued()
+            or (self.worker and not self.worker.done())
+            or not self._entry_capacity()
+        ):
             self._reset_waiting()
             return {}
         eligible = []
@@ -286,10 +305,13 @@ class LiveOrderStrategy(ManualOrderStrategy):
             ):
                 view[key] = t.get(key)
             view["estimated_spread_gain"] = None
+            view["profit_estimate"] = None
             if t.get("state") == "OPEN" and t.get("actual_entry_spread") is not None and valid:
-                b, m = self.binance_quote, self.mt5_quote
-                cost = b.ask - m.bid if t["sell"] else m.ask - b.bid
+                cost = self._close_cost(t["sell"])
                 view["estimated_spread_gain"] = str(D(t["actual_entry_spread"]) - cost)
+                view["profit_estimate"] = expected_net_pnl(
+                    t, cost, self.settings.live.profit_budget, self.hedge.underlying_per_binance_qty
+                )
         return views
 
     async def _execute(self, c, trade=None, *, closing=False, confirmed_ns=None):
@@ -300,8 +322,8 @@ class LiveOrderStrategy(ManualOrderStrategy):
                 if c.close_reason == "threshold":
                     b, m, now = self.binance_quote, self.mt5_quote, now_ms()
                     invalid = self.guard.check(b, m, now)
-                    cost = None if invalid else b.ask - m.bid if t["sell"] else m.ask - b.bid
-                    if invalid or cost > c.exit_threshold:
+                    cost = None if invalid else self._close_cost(t["sell"])
+                    if invalid or self._exit_edge(c, t, cost) < 0:
                         c.state, c.close_requested, c.close_reason = "OPEN", False, None
                         return
                 await self._close(t)
@@ -313,6 +335,7 @@ class LiveOrderStrategy(ManualOrderStrategy):
                     or c.cancel_requested
                     or self._close_queued()
                     or self.guard.check(b, m, now)
+                    or not self._entry_capacity()
                 ):
                     c.state = "CANCELED" if c.cancel_requested else "WAITING"
                     return
@@ -333,6 +356,7 @@ class LiveOrderStrategy(ManualOrderStrategy):
                     price=str(price),
                     filled_qty="0",
                     lots="0",
+                    mt5_contract_size=str(self.hedge.mt5.contract_size),
                     mt5_ticket=None,
                     created_at_ms=now,
                     updated_at_ms=now,
@@ -349,7 +373,8 @@ class LiveOrderStrategy(ManualOrderStrategy):
                 await self._open(c, t, confirmed_ns=confirmed_ns)
             if t["state"] == "OPEN":
                 c.state = "OPEN"
-                c.execution_count += 1
+                if not closing:
+                    c.execution_count += 1
             elif t["state"] in {"CLOSED", "CANCELED"}:
                 c.close_requested = False
                 c.close_reason = None
@@ -365,6 +390,20 @@ class LiveOrderStrategy(ManualOrderStrategy):
                     c.queue_seq = self._sequence()
             else:
                 c.state = "FAILED"
+        except PostOnlyWouldMatch:
+            if t is None:
+                c.state = "WAITING"
+            elif closing:
+                t["state"], t["closing_maker"] = "OPEN", False
+                c.state, c.close_requested, c.close_reason = "OPEN", False, None
+                t["active_close"]["post_only_rejected"] = True
+                await self._save(t, "live_post_only_rejected")
+            else:
+                t["state"] = "CANCELED"
+                t["post_only_rejected"] = True
+                c.state = "CANCELED" if c.cancel_requested else "WAITING"
+                c.queue_seq = self._sequence()
+                await self._save(t, "live_post_only_rejected")
         except OrderRejected as exc:
             # Only before any fill, or definitive validation failure, is a rejection safe.
             if t is not None and D(t.get("filled_qty", "0")) > 0:
@@ -381,6 +420,9 @@ class LiveOrderStrategy(ManualOrderStrategy):
                 self.user_updates.forget(t["open_client_id"])
                 self.dispatch_starts.pop(t["open_client_id"], None)
                 self.dispatch_starts.pop("au" + t["trade_id"][:20], None)
+                for tag, sample in list(self.dispatch_starts.items()):
+                    if sample[0] is t:
+                        self.dispatch_starts.pop(tag, None)
             self.active_condition_id = None
             self._reset_waiting()
             confirmation = self.condition_confirmations.get("exit:" + c.request_id)
@@ -396,19 +438,74 @@ class LiveOrderStrategy(ManualOrderStrategy):
             t["state"], t["error"] = "REVIEW", str(exc)
             await self._save(t, "live_execution_uncertain")
 
+    async def _advance(self, t, result):
+        from arbitrage.strategy.hedge_ledger import advance, cycle
+
+        book = cycle(t)
+        if D(result["executedQty"]) > 0:
+            self.user_updates.first_fill_ns.setdefault(book["open_client_id"], monotonic_ns())
+        try:
+            await advance(self, t, result)
+        except OrderRejected:
+            # Definitive pre-send rejection: stop new hedges, compensate proven remainder later.
+            book["hedge_rejected"] = True
+
+    async def _cancel_with_hedges(self, c, t, result=None):
+        from arbitrage.strategy.hedge_ledger import cycle
+
+        book = cycle(t)
+        stamp = monotonic_ns()
+        if result is not None and D(result["executedQty"]) > 0:
+            self.user_updates.first_fill_ns.setdefault(book["open_client_id"], stamp)
+        t["state"] = "CANCEL_INTENT"
+        await self._save(t, "live_cancel_intent")
+        self._measure_dispatch(book["open_client_id"], t, "cancel_dispatch", stamp)
+        task = asyncio.create_task(self.binance.cancel(book["open_client_id"]))
+        try:
+            if result is not None:
+                await self._advance(t, result)
+            while not task.done():
+                self.execution_wakeup.clear()
+                pushed = self.user_updates.get(book["open_client_id"])
+                if pushed and D(pushed["executedQty"]) > D(book.get("cumulative_filled", "0")):
+                    await self._advance(t, pushed)
+                wake = asyncio.create_task(self.execution_wakeup.wait())
+                try:
+                    await asyncio.wait(
+                        (task, wake),
+                        timeout=self.settings.market.watchdog_ms / 1000,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    wake.cancel()
+                    await asyncio.gather(wake, return_exceptions=True)
+            final = task.result()
+            if final.get("status") not in END or "executedQty" not in final:
+                raise ExecutionUnknown("Final maker quantity unconfirmed")
+            await self._advance(t, final)
+            return final
+        finally:
+            # Never abandon a venue mutation or repeat a hedge after an uncertain response.
+            await asyncio.shield(asyncio.gather(task, return_exceptions=True))
+
+    def _pending_value(self, c, t):
+        if t.get("closing_maker"):
+            price = D(t["active_close"]["price"])
+            cost = price - self.mt5_quote.bid if t["sell"] else self.mt5_quote.ask - price
+            return D(0) if c.close_reason == "manual" else self._exit_edge(c, t, cost)
+        return pending_spread(c.direction, D(t["price"]), self.mt5_quote)
+
     async def _open(self, c, t, *, confirmed_ns=None):
-        timings = t.setdefault("timings_ns", {})
-        fill_seen_ns = None
-        await self._save(t, "live_entry_intent")  # Durable before any venue mutation.
+        await self._save(t, "live_entry_intent")
         self.user_updates.watch(
             t["open_client_id"],
             quantity=D(t["quantity"]),
             S="SELL" if t["sell"] else "BUY",
             ps=t["position_side"],
         )
+        if confirmed_ns is not None:
+            self._measure_dispatch(t["open_client_id"], t, "entry_dispatch", confirmed_ns)
         try:
-            if confirmed_ns is not None:
-                self._measure_dispatch(t["open_client_id"], t, "entry_dispatch", confirmed_ns)
             result = await self.binance.submit_maker(
                 t["open_client_id"],
                 "SELL" if t["sell"] else "BUY",
@@ -417,94 +514,46 @@ class LiveOrderStrategy(ManualOrderStrategy):
                 price=D(t["price"]),
             )
         except ExecutionUnknown:
-            # Cancel by the durable client ID; never send a second entry POST.
-            result = await self.binance.cancel(t["open_client_id"])
+            result = await self._cancel_with_hedges(c, t)
         self.orders_created += 1
-        t["state"] = "MAKER_PENDING"
         policy = CancelPolicy(
             c.cancel_threshold,
             self.settings.maker.cancel_confirm_ms,
             self.settings.maker.max_pending_ms,
         )
         if "status" not in result or "executedQty" not in result:
-            result = await self._query_or_cancel(c, t, policy, timings, immediate=True)
+            result = await self._query_or_cancel(c, t, policy, {}, immediate=True)
         while result["status"] not in END:
-            # Freeze cumulative fill before hedging: cancel remaining quantity on the first fill.
-            now = now_ms()
-            if D(result["executedQty"]) > 0 and fill_seen_ns is None:
-                fill_seen_ns = self.user_updates.first_fill_ns.get(t["open_client_id"])
-                if fill_seen_ns is None:
-                    fill_seen_ns = monotonic_ns()
-            cancel = (
-                self.stopping
-                or c.cancel_requested
-                or self._close_queued()
-                or D(result["executedQty"]) > 0
-            )
-            if self.guard.check(self.binance_quote, self.mt5_quote, now):
-                cancel = True
-            else:
-                spread = pending_spread(c.direction, D(t["price"]), self.mt5_quote)
-                cancel = cancel or policy.update(spread, now, t["created_at_ms"])
-            if cancel:
-                cancel_ns = monotonic_ns()
-                t["state"] = "CANCEL_INTENT"
-                await self._save(t, "live_cancel_intent")
-                self._measure_dispatch(t["open_client_id"], t, "cancel_dispatch", cancel_ns)
-                result = await self.binance.cancel(t["open_client_id"])
+            if D(result["executedQty"]) > 0:
+                result = await self._cancel_with_hedges(c, t, result)
                 break
-            result = await self._query_or_cancel(c, t, policy, timings)
-        if result.get("status") not in END or "executedQty" not in result:
-            raise ExecutionUnknown("Binance final execution quantity unconfirmed")
-        filled = D(result["executedQty"])
-        if not filled.is_finite() or filled < 0:
-            raise ExecutionUnknown("Binance invalid cumulative fill")
-        t.update(binance_open=result, filled_qty=str(filled))
-        if not filled:
-            t["state"] = "CANCELED"
-            await self._save(t, "live_entry_unfilled")
-            return
-        if filled > D(t["quantity"]):
-            raise ExecutionUnknown("Binance fill exceeds requested quantity")
-        if fill_seen_ns is None:
-            fill_seen_ns = self.user_updates.first_fill_ns.get(t["open_client_id"])
-            if fill_seen_ns is None:
-                fill_seen_ns = monotonic_ns()
-        try:
-            lots = self.hedge.binance_to_lots(filled)
-        except ValueError:
-            await self._flatten_unhedged(t)
-            return
-        t.update(state="HEDGE_INTENT", lots=str(lots))
-        await self._save(t, "live_hedge_intent")
-        try:
-            self._measure_dispatch("au" + t["trade_id"][:20], t, "hedge_dispatch", fill_seen_ns)
-            result = await self.mt5.send("au" + t["trade_id"][:20], t["sell"], lots)
-        except OrderRejected:
-            await self._flatten_unhedged(t)
-            return
-        t["mt5_open"] = result
-        positions = await self.mt5.positions()
-        matches = [p for p in positions if p["ticket"] == result["order"]]
-        if len(matches) != 1 or D(matches[0]["volume"]) != lots:
-            raise ExecutionUnknown("MT5 hedge filled but position ticket needs reconciliation")
-        p = matches[0]
-        t.update(mt5_ticket=p["ticket"], mt5_identifier=p["identifier"], state="OPEN")
-        await self._save(t, "live_pair_opened")
+            result = await self._query_or_cancel(c, t, policy, {})
+        await self._advance(t, result)
+        filled = D(t["filled_qty"])
+        paired = D(t.get("mt5_hedged_qty", "0"))
+        t["paired_qty"] = str(paired)
+        if filled > paired:
+            await self._compensate(t, filled - paired)
+        t["state"] = "OPEN" if paired else "FAILED" if filled else "CANCELED"
+        await self._save(t, "live_pair_opened" if paired else "live_entry_finished")
 
     async def _query_or_cancel(self, c, t, policy, timings, *, immediate=False):
+        from arbitrage.strategy.hedge_ledger import cycle
+
+        book = cycle(t)
+
         async def query(*, urgent=False):
             # Healthy pushes are primary; REST periodically checks for silent gaps.
             delay = 1 if self.user_updates.connected else self.settings.live.order_poll_ms / 1000
             await asyncio.sleep(0 if immediate or urgent else delay)
-            return await self.binance.order(t["open_client_id"])
+            return await self.binance.order(book["open_client_id"])
 
         task = asyncio.create_task(query())
         had_stream = self.user_updates.connected
         try:
             while True:
                 self.execution_wakeup.clear()
-                pushed = self.user_updates.get(t["open_client_id"])
+                pushed = self.user_updates.get(book["open_client_id"])
                 if pushed and (pushed["status"] in END or D(pushed["executedQty"]) > 0):
                     return pushed
                 if had_stream and not self.user_updates.connected and not task.done():
@@ -514,19 +563,20 @@ class LiveOrderStrategy(ManualOrderStrategy):
                     had_stream = False
                 now = now_ms()
                 invalid = self.guard.check(self.binance_quote, self.mt5_quote, now)
-                cancel = self.stopping or c.cancel_requested or self._close_queued() or invalid
+                cancel = (
+                    self.stopping
+                    or c.cancel_requested
+                    or (not t.get("closing_maker") and self._close_queued())
+                    or invalid
+                )
                 if not cancel:
                     cancel = policy.update(
-                        pending_spread(c.direction, D(t["price"]), self.mt5_quote),
+                        self._pending_value(c, t),
                         now,
-                        t["created_at_ms"],
+                        book["created_at_ms"],
                     )
                 if cancel:
-                    stamp = monotonic_ns()
-                    t["state"] = "CANCEL_INTENT"
-                    await self._save(t, "live_cancel_intent")
-                    self._measure_dispatch(t["open_client_id"], t, "cancel_dispatch", stamp)
-                    return await self.binance.cancel(t["open_client_id"])
+                    return await self._cancel_with_hedges(c, t)
                 if task.done():
                     try:
                         result = task.result()
@@ -534,7 +584,7 @@ class LiveOrderStrategy(ManualOrderStrategy):
                             raise ExecutionUnknown("Binance query lacks execution evidence")
                         return result
                     except (ExecutionUnknown, OrderRejected):
-                        return await self.binance.cancel(t["open_client_id"])
+                        return await self._cancel_with_hedges(c, t)
                 wake = asyncio.create_task(self.execution_wakeup.wait())
                 try:
                     await asyncio.wait(
@@ -549,36 +599,98 @@ class LiveOrderStrategy(ManualOrderStrategy):
             task.cancel()  # This is a read-only GET, never an order submission.
             await asyncio.gather(task, return_exceptions=True)
 
-    async def _market_close_binance(self, t, key):
-        t[key] = "au" + uuid4().hex
-        await self._save(t, "live_binance_close_intent")
+    async def _compensate(self, t, quantity, *, restore=False):
+        client = "au" + uuid4().hex
+        t["compensate_client_id"] = client
+        intent = dict(client_id=client, quantity=str(quantity), restore=restore, state="INTENT")
+        t.setdefault("compensations", []).append(intent)
+        await self._save(t, "live_compensation_intent")
+        sell = t["sell"] if restore else not t["sell"]
         result = await self.binance.submit_market(
-            t[key], "BUY" if t["sell"] else "SELL", t["position_side"], D(t["filled_qty"])
+            client, "SELL" if sell else "BUY", t["position_side"], quantity
         )
-        if result["status"] != "FILLED" or D(result["executedQty"]) != D(t["filled_qty"]):
-            raise ExecutionUnknown("Binance close incomplete; do not retry")
-        t["binance_close"] = result
-        await self._save(t, "live_binance_closed")
+        if result.get("status") != "FILLED" or D(result.get("executedQty", "-1")) != quantity:
+            raise ExecutionUnknown("Compensation quantity unconfirmed")
+        intent.update(state="DONE", result=result)
+        if not t.get("mt5_hedged_qty"):
+            t["binance_close"] = result
+        await self._save(t, "live_compensation_done")
 
-    async def _flatten_unhedged(self, t):
-        t["state"] = "COMPENSATE_INTENT"
-        await self._market_close_binance(t, "compensate_client_id")
-        t["state"] = "FAILED"
-        t["error"] = "无法精确对冲，已撤销剩余挂单并平掉 Binance 实际成交量"
-        await self._save(t, "live_unhedged_flattened")
+    def _exit_edge(self, c, t, cost):
+        edge = c.exit_threshold - cost if c.exit_threshold is not None else D(0)
+        if c.min_net_profit is not None:
+            estimate = expected_net_pnl(
+                t, cost, self.settings.live.profit_budget, self.hedge.underlying_per_binance_qty
+            )
+            value = estimate["expected_net_pnl"]
+            if value is None:
+                return D("-Infinity")
+            if value < c.min_net_profit:
+                return D(-1)
+        return edge
 
     async def _close(self, t):
-        t["state"] = "CLOSE_INTENT"
-        await self._market_close_binance(t, "close_client_id")
-        t["state"] = "MT5_CLOSE_INTENT"
-        await self._save(t, "live_mt5_close_intent")
-        t["mt5_close"] = await self.mt5.send(
-            "ac" + t["trade_id"][:20], not t["sell"], D(t["lots"]), ticket=t["mt5_ticket"]
+        from arbitrage.strategy.hedge_ledger import average, remaining
+
+        c = self.conditions[t["condition_id"]]
+        b = self.binance_quote
+        if self.guard.check(b, self.mt5_quote, now_ms()):
+            return
+        price = round_step(
+            b.bid if t["sell"] else b.ask, self.maker.spec.tick_size, up=not t["sell"]
         )
-        if any(p["ticket"] == t["mt5_ticket"] for p in await self.mt5.positions()):
-            raise ExecutionUnknown("MT5 close acknowledged but position remains")
-        t["state"] = "CLOSED"
-        await self._save(t, "live_pair_closed")
+        quantity = remaining(t)
+        self.maker.spec.quantity(quantity, price)
+        client = "ac" + uuid4().hex
+        book = dict(
+            open_client_id=client,
+            price=str(price),
+            quantity=str(quantity),
+            created_at_ms=now_ms(),
+            cumulative_filled="0",
+            processed_filled="0",
+        )
+        t["active_close"], t["closing_maker"], t["state"] = book, True, "CLOSE_INTENT"
+        t["close_client_id"] = client
+        t.setdefault("close_attempts", []).append(book)
+        await self._save(t, "live_close_maker_intent")
+        self.user_updates.watch(
+            client, quantity=quantity, S="BUY" if t["sell"] else "SELL", ps=t["position_side"]
+        )
+        try:
+            try:
+                result = await self.binance.submit_maker(
+                    client,
+                    "BUY" if t["sell"] else "SELL",
+                    t["position_side"],
+                    quantity,
+                    price=price,
+                )
+            except ExecutionUnknown:
+                result = await self._cancel_with_hedges(c, t)
+            policy = CancelPolicy(
+                D(0), self.settings.maker.cancel_confirm_ms, self.settings.maker.max_pending_ms
+            )
+            if "status" not in result or "executedQty" not in result:
+                result = await self._query_or_cancel(c, t, policy, {}, immediate=True)
+            while result["status"] not in END:
+                if D(result["executedQty"]) > 0:
+                    result = await self._cancel_with_hedges(c, t, result)
+                    break
+                result = await self._query_or_cancel(c, t, policy, {})
+            await self._advance(t, result)
+            residue = D(book["cumulative_filled"]) - D(book["processed_filled"])
+            if residue:
+                # An unrepresentable exit fragment is restored, never over-close MT5.
+                await self._compensate(t, residue, restore=True)
+            results = [a["result"] for a in t["close_attempts"] if a.get("result")]
+            t["binance_close"] = dict(avgPrice=average(results, "executedQty", "avgPrice"))
+            t["state"] = "CLOSED" if remaining(t) == 0 else "OPEN"
+            c.close_requested, c.close_reason = False, None
+            t["closing_maker"] = False
+            await self._save(t, "live_close_maker_finished")
+        finally:
+            self.user_updates.forget(client)
 
     async def _accounts(self):
         try:
@@ -602,20 +714,39 @@ class LiveOrderStrategy(ManualOrderStrategy):
                 )
                 if (t["state"] == "CLOSED" or compensated) and "settlement" not in t:
                     trades = []
-                    for key in ("binance_open", "binance_close"):
-                        rows = await self.binance.trades(t[key]["orderId"])
-                        if sum((D(r["qty"]) for r in rows), D(0)) != D(t["filled_qty"]):
+                    orders = [t["binance_open"]]
+                    if "close_attempts" in t:
+                        orders.extend(
+                            a["result"]
+                            for a in t["close_attempts"]
+                            if a.get("result") and D(a["result"]["executedQty"]) > 0
+                        )
+                    elif not t.get("compensations"):
+                        orders.append(t["binance_close"])
+                    orders.extend(
+                        a["result"] for a in t.get("compensations", []) if a.get("result")
+                    )
+                    for order in orders:
+                        rows = await self.binance.trades(order["orderId"])
+                        if sum((D(r["qty"]) for r in rows), D(0)) != D(order["executedQty"]):
                             break
                         trades.extend(rows)
                     else:
                         if self.worker and not self.worker.done():
                             break
-                        deals = [] if compensated else await self.mt5.deals(t["mt5_identifier"])
-                        if not compensated and any(
-                            sum((D(d["volume"]) for d in deals if d["entry"] == side), D(0))
-                            != D(t["lots"])
-                            for side in (0, 1)
-                        ):
+                        deals = []
+                        complete = True
+                        for leg in [] if compensated else legs(t):
+                            rows = await self.mt5.deals(leg["identifier"])
+                            if any(
+                                sum((D(d["volume"]) for d in rows if d["entry"] == side), D(0))
+                                != D(leg["lots"])
+                                for side in (0, 1)
+                            ):
+                                complete = False
+                                break
+                            deals.extend(rows)
+                        if not complete:
                             continue
                         fees = {}
                         for r in trades:
