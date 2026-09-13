@@ -5,6 +5,57 @@ from decimal import Decimal, InvalidOperation
 D = Decimal
 
 
+def expected_net_pnl(t, cost, budget, multiplier):
+    actual = t.get("actual_entry_spread")
+    fees = {key: getattr(budget, key) for key in ("open_fees", "close_fees", "funding", "swap")}
+    quantity = D(t.get("paired_qty", t.get("filled_qty", "0")))
+    result = dict(gross_pnl=None, costs=fees, expected_net_pnl=None, estimated=True)
+    if actual is None:
+        return result
+    if D(t.get("closed_qty", "0")) or t.get("compensations"):
+        cash = observed_cash(t, multiplier)
+        if cash is None:
+            return result
+        gross = cash - (quantity - D(t.get("closed_qty", "0"))) * multiplier * cost
+    else:
+        gross = quantity * multiplier * (D(actual) - cost)
+    result["gross_pnl"] = gross
+    if budget.quote_units_aligned and all(value is not None for value in fees.values()):
+        result["expected_net_pnl"] = gross - sum(fees.values(), D(0))
+    return result
+
+
+def observed_cash(t, multiplier):
+    """Local pair cash-flow attribution, including risk compensation and all MT5 tickets."""
+    contract = t.get("mt5_contract_size")
+    if contract is None:
+        return None
+    sign = D(1) if t["sell"] else D(-1)
+    total = D(0)
+    orders = [(t.get("binance_open"), sign)]
+    orders.extend((a.get("result"), -sign) for a in t.get("close_attempts", []) if a.get("result"))
+    orders.extend(
+        (a.get("result"), sign if a["restore"] else -sign) for a in t.get("compensations", [])
+    )
+    for result, side in orders:
+        if result is None:
+            return None
+        quantity = D(result["executedQty"])
+        if not quantity:
+            continue
+        price = fill_price(result, "avgPrice")
+        if price is None:
+            return None
+        total += side * quantity * multiplier * price
+    for name, side in (("mt5_open_fills", -sign), ("mt5_close_fills", sign)):
+        for result in t.get(name, []):
+            price = fill_price(result, "price")
+            if price is None:
+                return None
+            total += side * D(result["volume"]) * D(contract) * price
+    return total
+
+
 def fill_price(result, key):
     try:
         value = D(str(result[key]))
@@ -26,8 +77,13 @@ def update_metrics(t, multiplier):
         t["entry_spread_loss"] = str(D(signal) - D(actual))
     if t["state"] == "CLOSED" and actual is not None and t.get("actual_exit_spread") is not None:
         t["gross_pnl"] = str(
-            D(t["filled_qty"]) * multiplier * (D(actual) - D(t["actual_exit_spread"]))
+            D(t.get("paired_qty", t["filled_qty"]))
+            * multiplier
+            * (D(actual) - D(t["actual_exit_spread"]))
         )
+        if "mt5_open_fills" in t:
+            cash = observed_cash(t, multiplier)
+            t["gross_pnl"] = str(cash) if cash is not None else None
     elif t["state"] == "FAILED" and t.get("compensate_client_id"):
         b = fill_price(t.get("binance_open"), "avgPrice")
         x = fill_price(t.get("binance_close"), "avgPrice")

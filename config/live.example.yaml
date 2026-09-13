@@ -17,6 +17,14 @@ trading:
   binance_underlying_per_qty: null
 live:
   enabled: false
+  max_open_pairs: 1
+  # Whole-pair cost budgets in aligned quote-currency units. Null means unknown, not zero.
+  profit_budget:
+    quote_units_aligned: false
+    open_fees: null
+    close_fees: null
+    funding: null
+    swap: null
   max_binance_qty: "1"
   order_poll_ms: 250
   mt5_deviation_points: 20

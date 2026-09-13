@@ -78,7 +78,18 @@ class DatabaseConfig(ConfigModel):
     quote_sample_ms: int = Field(default=1000, ge=1)
 
 
+class ProfitBudget(ConfigModel):
+    # All amounts refer to the whole pair, in the explicitly aligned quote currency.
+    quote_units_aligned: bool = False
+    open_fees: Annotated[Decimal, Field(ge=0, allow_inf_nan=False)] | None = None
+    close_fees: Annotated[Decimal, Field(ge=0, allow_inf_nan=False)] | None = None
+    funding: Annotated[Decimal, Field(ge=0, allow_inf_nan=False)] | None = None
+    swap: Annotated[Decimal, Field(ge=0, allow_inf_nan=False)] | None = None
+
+
 class LiveConfig(ConfigModel):
+    max_open_pairs: int = Field(default=1, ge=1, le=1)
+    profit_budget: ProfitBudget = Field(default_factory=ProfitBudget)
     enabled: bool = False
     order_poll_ms: int = Field(default=250, ge=100)
     mt5_deviation_points: int = Field(default=20, ge=0, le=1000)

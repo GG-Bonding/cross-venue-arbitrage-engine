@@ -17,6 +17,7 @@ class ConditionalRequest(ConfigModel):
     quantity: PositiveDecimal
     repeat: bool = Field(default=False, strict=True)
     exit_threshold: FiniteDecimal | None = None
+    min_net_profit: FiniteDecimal | None = Field(default=None, ge=0)
 
     @field_validator("request_id")
     @classmethod
@@ -49,6 +50,7 @@ class ConditionalOrder:
     exit_threshold: Decimal | None = None
     close_requested: bool = False
     close_reason: str | None = None
+    min_net_profit: Decimal | None = None
 
     @classmethod
     def from_payload(cls, payload: dict) -> Self:
@@ -58,6 +60,8 @@ class ConditionalOrder:
             data[name] = Decimal(data[name])
         if data.get("exit_threshold") is not None:
             data["exit_threshold"] = Decimal(data["exit_threshold"])
+        if data.get("min_net_profit") is not None:
+            data["min_net_profit"] = Decimal(data["min_net_profit"])
         return cls(**data)
 
     def request_fields(self) -> dict:

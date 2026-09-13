@@ -2,7 +2,20 @@ from decimal import Decimal as D
 
 import pytest
 
-from arbitrage.strategy.trade_metrics import settlement_totals, update_metrics
+from arbitrage.config import ProfitBudget
+from arbitrage.strategy.trade_metrics import expected_net_pnl, settlement_totals, update_metrics
+
+
+def test_expected_net_requires_complete_explicit_budget():
+    t = dict(actual_entry_spread="4.08", filled_qty="1", sell=True)
+    assert expected_net_pnl(t, D("2.90"), ProfitBudget(), D(1))["expected_net_pnl"] is None
+    budget = ProfitBudget(
+        quote_units_aligned=True, open_fees="0.1", close_fees="0.15", funding="0.05", swap="0.05"
+    )
+    result = expected_net_pnl(t, D("2.90"), budget, D(1))
+    assert result["gross_pnl"] == D("1.18")
+    assert result["expected_net_pnl"] == D("0.83")
+    assert result["estimated"]
 
 
 @pytest.mark.parametrize("sell,entry,exit_,pnl", [(True, "4", "3", "2"), (False, "-4", "-3", "-2")])
